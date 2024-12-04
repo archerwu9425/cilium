@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/cilium/hive/cell"
-	"github.com/spf13/pflag"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
@@ -19,15 +18,6 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
-
-type Config struct {
-	// ClusterMeshConfig is the path to the clustermesh configuration directory.
-	ClusterMeshConfig string
-}
-
-func (def Config) Flags(flags *pflag.FlagSet) {
-	flags.String("clustermesh-config", def.ClusterMeshConfig, "Path to the ClusterMesh configuration directory")
-}
 
 type StatusFunc func() *models.RemoteCluster
 type RemoteClusterCreatorFunc func(name string, status StatusFunc) RemoteCluster
@@ -178,8 +168,10 @@ func (cm *clusterMesh) add(name, path string) {
 	}
 
 	if err := types.ValidateClusterName(name); err != nil {
-		log.WithField(fieldClusterName, name).WithError(err).
-			Error("Remote cluster name is invalid. The connection will be forbidden starting from Cilium v1.17")
+		log.WithField(fieldClusterName, name).
+			WithError(fmt.Errorf("invalid cluster name: %w", err)).
+			Error("Cannot connect to remote cluster")
+		return
 	}
 
 	cm.mutex.Lock()

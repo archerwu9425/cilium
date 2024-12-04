@@ -66,20 +66,27 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 			return fmt.Errorf("Invalid value for --%s: %s", option.NodePortMode, option.Config.NodePortMode)
 		}
 
-		if option.Config.NodePortMode == option.NodePortModeDSR &&
-			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchOption &&
-			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchIPIP &&
-			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchGeneve ||
-			option.Config.NodePortMode == option.NodePortModeHybrid &&
-				option.Config.LoadBalancerDSRDispatch != option.DSRDispatchOption &&
-				option.Config.LoadBalancerDSRDispatch != option.DSRDispatchGeneve {
-			return fmt.Errorf("Invalid value for --%s: %s", option.LoadBalancerDSRDispatch, option.Config.LoadBalancerDSRDispatch)
+		if option.Config.LoadBalancerModeAnnotation &&
+			option.Config.NodePortMode == option.NodePortModeHybrid {
+			return fmt.Errorf("The value --%s=%s is not supported as default under annotation mode", option.NodePortMode, option.Config.NodePortMode)
 		}
 
 		if option.Config.NodePortMode == option.NodePortModeDSR &&
-			option.Config.LoadBalancerDSRL4Xlate != option.DSRL4XlateFrontend &&
-			option.Config.LoadBalancerDSRL4Xlate != option.DSRL4XlateBackend {
-			return fmt.Errorf("Invalid value for --%s: %s", option.LoadBalancerDSRL4Xlate, option.Config.LoadBalancerDSRL4Xlate)
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchOption &&
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchIPIP &&
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchGeneve {
+			return fmt.Errorf("Invalid value for --%s: %s", option.LoadBalancerDSRDispatch, option.Config.LoadBalancerDSRDispatch)
+		}
+
+		if option.Config.NodePortMode == option.NodePortModeHybrid &&
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchOption &&
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchGeneve {
+			return fmt.Errorf("Invalid value for --%s: %s", option.LoadBalancerDSRDispatch, option.Config.LoadBalancerDSRDispatch)
+		}
+
+		if option.Config.LoadBalancerModeAnnotation &&
+			option.Config.LoadBalancerDSRDispatch != option.DSRDispatchIPIP {
+			return fmt.Errorf("Invalid value for --%s: %s", option.LoadBalancerDSRDispatch, option.Config.LoadBalancerDSRDispatch)
 		}
 
 		if option.Config.LoadBalancerRSSv4CIDR != "" {
@@ -129,13 +136,6 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 		}
 
 		if option.Config.NodePortAcceleration != option.NodePortAccelerationDisabled &&
-			option.Config.NodePortAcceleration != option.NodePortAccelerationGeneric &&
-			option.Config.NodePortAcceleration != option.NodePortAccelerationNative &&
-			option.Config.NodePortAcceleration != option.NodePortAccelerationBestEffort {
-			return fmt.Errorf("Invalid value for --%s: %s", option.NodePortAcceleration, option.Config.NodePortAcceleration)
-		}
-
-		if option.Config.NodePortAcceleration != option.NodePortAccelerationDisabled &&
 			option.Config.EnableWireguard && option.Config.EncryptNode {
 			log.WithField(logfields.Hint,
 				"Disable XDP acceleration to encrypt N/S Loadbalancer traffic.").
@@ -148,7 +148,8 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 			log.Warning("NodePort BPF configured without bind(2) protection against service ports")
 		}
 
-		if option.Config.NodePortAlg == option.NodePortAlgMaglev {
+		if option.Config.NodePortAlg == option.NodePortAlgMaglev ||
+			option.Config.LoadBalancerAlgorithmAnnotation {
 			// "Let N be the size of a VIP's backend pool." [...] "In practice, we choose M to be
 			// larger than 100 x N to ensure at most a 1% difference in hash space assigned to
 			// backends." (from Maglev paper, page 6)
@@ -210,7 +211,8 @@ func initKubeProxyReplacementOptions(sysctl sysctl.Sysctl, tunnelConfig tunnel.C
 
 		option.Config.EnableHealthDatapath =
 			option.Config.DatapathMode == datapathOption.DatapathModeLBOnly &&
-				option.Config.NodePortMode == option.NodePortModeDSR &&
+				(option.Config.NodePortMode == option.NodePortModeDSR ||
+					option.Config.LoadBalancerModeAnnotation) &&
 				option.Config.LoadBalancerDSRDispatch == option.DSRDispatchIPIP
 	}
 
@@ -309,32 +311,35 @@ func probeKubeProxyReplacementOptions(sysctl sysctl.Sysctl) error {
 		if option.Config.EnableSocketLBTracing {
 			if probes.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnPerfEventOutput) != nil {
 				option.Config.EnableSocketLBTracing = false
-				log.Warn("Disabling socket-LB tracing as it requires kernel 5.7 or newer")
+				log.Info("Disabling socket-LB tracing as it requires kernel 5.7 or newer")
+			}
+		}
+
+		if option.Config.EnableSessionAffinity {
+			if probes.HaveProgramHelper(ebpf.CGroupSock, asm.FnGetNetnsCookie) != nil ||
+				probes.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnGetNetnsCookie) != nil {
+				log.Warn("Session affinity for host reachable services needs kernel 5.7.0 or newer " +
+					"to work properly when accessed from inside cluster: the same service endpoint " +
+					"will be selected from all network namespaces on the host.")
+			}
+		}
+
+		if option.Config.BPFSocketLBHostnsOnly {
+			if probes.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnGetNetnsCookie) != nil {
+				option.Config.BPFSocketLBHostnsOnly = false
+				log.Warn("Without network namespace cookie lookup functionality, BPF datapath " +
+					"cannot distinguish root and non-root namespace, skipping socket-level " +
+					"loadbalancing will not work. Istio routing chains will be missed. " +
+					"Needs kernel version >= 5.7")
 			}
 		}
 	} else {
 		option.Config.EnableSocketLBTracing = false
-	}
+		option.Config.EnableSocketLBPodConnectionTermination = false
 
-	if option.Config.EnableSessionAffinity && option.Config.EnableSocketLB {
-		if probes.HaveProgramHelper(ebpf.CGroupSock, asm.FnGetNetnsCookie) != nil ||
-			probes.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnGetNetnsCookie) != nil {
-			log.Warn("Session affinity for host reachable services needs kernel 5.7.0 or newer " +
-				"to work properly when accessed from inside cluster: the same service endpoint " +
-				"will be selected from all network namespaces on the host.")
-		}
-	}
-
-	if option.Config.BPFSocketLBHostnsOnly {
-		if !option.Config.EnableSocketLB {
+		if option.Config.BPFSocketLBHostnsOnly {
 			option.Config.BPFSocketLBHostnsOnly = false
 			log.Warnf("%s only takes effect when %s is true", option.BPFSocketLBHostnsOnly, option.EnableSocketLB)
-		} else if probes.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnGetNetnsCookie) != nil {
-			option.Config.BPFSocketLBHostnsOnly = false
-			log.Warn("Without network namespace cookie lookup functionality, BPF datapath " +
-				"cannot distinguish root and non-root namespace, skipping socket-level " +
-				"loadbalancing will not work. Istio routing chains will be missed. " +
-				"Needs kernel version >= 5.7")
 		}
 	}
 
@@ -343,7 +348,7 @@ func probeKubeProxyReplacementOptions(sysctl sysctl.Sysctl) error {
 
 // finishKubeProxyReplacementInit finishes initialization of kube-proxy
 // replacement after all devices are known.
-func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Device) error {
+func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Device, directRoutingDevice string) error {
 	if !option.Config.EnableNodePort {
 		// Make sure that NodePort dependencies are disabled
 		disableNodePort()
@@ -388,12 +393,6 @@ func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Devi
 		}
 	}
 
-	if option.Config.NodePortAcceleration != option.NodePortAccelerationDisabled {
-		if err := setXDPMode(option.Config.NodePortAcceleration); err != nil {
-			return fmt.Errorf("Cannot set NodePort acceleration: %w", err)
-		}
-	}
-
 	option.Config.NodePortNat46X64 = option.Config.IsDualStack() &&
 		option.Config.DatapathMode == datapathOption.DatapathModeLBOnly &&
 		option.Config.NodePortMode == option.NodePortModeSNAT
@@ -412,6 +411,7 @@ func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Devi
 	if option.Config.EnableIPv4 &&
 		!option.Config.TunnelingEnabled() &&
 		option.Config.LoadBalancerUsesDSR() &&
+		directRoutingDevice != "" &&
 		len(devices) > 1 {
 
 		// In the case of the multi-dev NodePort DSR, if a request from an
@@ -421,15 +421,14 @@ func finishKubeProxyReplacementInit(sysctl sysctl.Sysctl, devices []*tables.Devi
 		// and the client IP is reachable via other device than the direct
 		// routing one.
 
-		iface := option.Config.DirectRoutingDevice
-		if val, err := sysctl.Read(fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface)); err != nil {
+		if val, err := sysctl.Read([]string{"net", "ipv4", "conf", directRoutingDevice, "rp_filter"}); err != nil {
 			log.Warnf("Unable to read net.ipv4.conf.%s.rp_filter: %s. Ignoring the check",
-				iface, err)
+				directRoutingDevice, err)
 		} else {
 			if val == "1" {
 				log.Warnf(`DSR might not work for requests sent to other than %s device. `+
 					`Run 'sysctl -w net.ipv4.conf.%s.rp_filter=2' (or set to '0') on each node to fix`,
-					iface, iface)
+					directRoutingDevice, directRoutingDevice)
 			}
 		}
 	}
@@ -518,7 +517,7 @@ func markHostExtension() {
 // Otherwise, if EnableAutoProtectNodePortRange == true, then append the nodeport
 // range to ip_local_reserved_ports.
 func checkNodePortAndEphemeralPortRanges(sysctl sysctl.Sysctl) error {
-	ephemeralPortRangeStr, err := sysctl.Read("net.ipv4.ip_local_port_range")
+	ephemeralPortRangeStr, err := sysctl.Read([]string{"net", "ipv4", "ip_local_port_range"})
 	if err != nil {
 		return fmt.Errorf("Unable to read net.ipv4.ip_local_port_range: %w", err)
 	}
@@ -550,7 +549,7 @@ func checkNodePortAndEphemeralPortRanges(sysctl sysctl.Sysctl) error {
 			nodePortRangeStr, ephemeralPortRangeStr)
 	}
 
-	reservedPortsStr, err := sysctl.Read("net.ipv4.ip_local_reserved_ports")
+	reservedPortsStr, err := sysctl.Read([]string{"net", "ipv4", "ip_local_reserved_ports"})
 	if err != nil {
 		return fmt.Errorf("Unable to read net.ipv4.ip_local_reserved_ports: %w", err)
 	}
@@ -596,34 +595,10 @@ func checkNodePortAndEphemeralPortRanges(sysctl sysctl.Sysctl) error {
 		reservedPortsStr += ","
 	}
 	reservedPortsStr += fmt.Sprintf("%d-%d", option.Config.NodePortMin, option.Config.NodePortMax)
-	if err := sysctl.Write("net.ipv4.ip_local_reserved_ports", reservedPortsStr); err != nil {
+	if err := sysctl.Write([]string{"net", "ipv4", "ip_local_reserved_ports"}, reservedPortsStr); err != nil {
 		return fmt.Errorf("Unable to addend nodeport range (%s) to net.ipv4.ip_local_reserved_ports: %w",
 			nodePortRangeStr, err)
 	}
 
-	return nil
-}
-
-func setXDPMode(mode string) error {
-	switch mode {
-	case option.XDPModeNative, option.XDPModeBestEffort:
-		if option.Config.XDPMode == option.XDPModeLinkNone ||
-			option.Config.XDPMode == option.XDPModeLinkDriver {
-			option.Config.XDPMode = option.XDPModeLinkDriver
-		} else {
-			return fmt.Errorf("XDP Mode conflict: current mode is %s, trying to set conflicting %s",
-				option.Config.XDPMode, option.XDPModeLinkDriver)
-		}
-	case option.XDPModeGeneric:
-		if option.Config.XDPMode == option.XDPModeLinkNone ||
-			option.Config.XDPMode == option.XDPModeLinkGeneric {
-			option.Config.XDPMode = option.XDPModeLinkGeneric
-		} else {
-			return fmt.Errorf("XDP Mode conflict: current mode is %s, trying to set conflicting %s",
-				option.Config.XDPMode, option.XDPModeLinkGeneric)
-		}
-	case option.XDPModeDisabled:
-		break
-	}
 	return nil
 }

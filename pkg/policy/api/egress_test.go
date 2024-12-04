@@ -17,7 +17,7 @@ import (
 
 func TestRequiresDerivativeRuleWithoutToGroups(t *testing.T) {
 	eg := EgressRule{}
-	require.Equal(t, false, eg.RequiresDerivative())
+	require.False(t, eg.RequiresDerivative())
 }
 
 func TestRequiresDerivativeRuleWithToGroups(t *testing.T) {
@@ -25,7 +25,7 @@ func TestRequiresDerivativeRuleWithToGroups(t *testing.T) {
 	eg.ToGroups = []Groups{
 		GetGroupsRule(),
 	}
-	require.Equal(t, true, eg.RequiresDerivative())
+	require.True(t, eg.RequiresDerivative())
 }
 
 func TestCreateDerivativeRuleWithoutToGroups(t *testing.T) {
@@ -43,7 +43,7 @@ func TestCreateDerivativeRuleWithoutToGroups(t *testing.T) {
 	}
 	newRule, err := eg.CreateDerivative(context.TODO())
 	require.EqualValues(t, newRule, eg)
-	require.Nil(t, err)
+	require.NoError(t, err)
 }
 
 func TestCreateDerivativeRuleWithToGroupsWitInvalidRegisterCallback(t *testing.T) {
@@ -76,12 +76,12 @@ func TestCreateDerivativeRuleWithToGroupsAndToPorts(t *testing.T) {
 	}
 
 	// Checking that the derivative rule is working correctly
-	require.Equal(t, true, eg.RequiresDerivative())
+	require.True(t, eg.RequiresDerivative())
 
 	newRule, err := eg.CreateDerivative(context.TODO())
-	require.Nil(t, err)
-	require.Equal(t, 0, len(newRule.ToGroups))
-	require.Equal(t, 1, len(newRule.ToCIDRSet))
+	require.NoError(t, err)
+	require.Empty(t, newRule.ToGroups)
+	require.Len(t, newRule.ToCIDRSet, 1)
 }
 
 func TestCreateDerivativeWithoutErrorAndNoIPs(t *testing.T) {
@@ -99,10 +99,10 @@ func TestCreateDerivativeWithoutErrorAndNoIPs(t *testing.T) {
 	}
 
 	// Checking that the derivative rule is working correctly
-	require.Equal(t, true, eg.RequiresDerivative())
+	require.True(t, eg.RequiresDerivative())
 
 	newRule, err := eg.CreateDerivative(context.TODO())
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.EqualValues(t, &EgressRule{}, newRule)
 }
 
@@ -352,8 +352,124 @@ func TestIsLabelBasedEgress(t *testing.T) {
 	for _, tt := range tests {
 		args := tt.setupArgs()
 		want := tt.setupWanted()
-		require.Equal(t, nil, args.eg.sanitize(), fmt.Sprintf("Test name: %q", tt.name))
+		require.NoError(t, args.eg.sanitize(false), "Test name: %q", tt.name)
 		isLabelBased := args.eg.AllowsWildcarding()
-		require.EqualValues(t, want.isLabelBased, isLabelBased, fmt.Sprintf("Test name: %q", tt.name))
+		require.EqualValues(t, want.isLabelBased, isLabelBased, "Test name: %q", tt.name)
+	}
+}
+
+func TestEgressCommonRuleDeepEqual(t *testing.T) {
+	testCases := []struct {
+		name      string
+		in, other *EgressCommonRule
+		expected  bool
+	}{
+		{
+			name:     "All fields are nil in both",
+			in:       &EgressCommonRule{},
+			other:    &EgressCommonRule{},
+			expected: true,
+		},
+		{
+			name: "All fields are empty in both",
+			in: &EgressCommonRule{
+				ToEndpoints: []EndpointSelector{},
+				ToCIDR:      []CIDR{},
+				ToCIDRSet:   []CIDRRule{},
+				ToEntities:  []Entity{},
+			},
+			other: &EgressCommonRule{
+				ToEndpoints: []EndpointSelector{},
+				ToCIDR:      []CIDR{},
+				ToCIDRSet:   []CIDRRule{},
+				ToEntities:  []Entity{},
+			},
+			expected: true,
+		},
+		{
+			name: "ToEndpoints is nil in left operand",
+			in: &EgressCommonRule{
+				ToEndpoints: nil,
+			},
+			other: &EgressCommonRule{
+				ToEndpoints: []EndpointSelector{},
+			},
+			expected: false,
+		},
+		{
+			name: "ToEndpoints is empty in left operand",
+			in: &EgressCommonRule{
+				ToEndpoints: []EndpointSelector{},
+			},
+			other: &EgressCommonRule{
+				ToEndpoints: nil,
+			},
+			expected: false,
+		},
+		{
+			name: "ToCIDR is nil in left operand",
+			in: &EgressCommonRule{
+				ToCIDR: nil,
+			},
+			other: &EgressCommonRule{
+				ToCIDR: []CIDR{},
+			},
+			expected: false,
+		},
+		{
+			name: "ToCIDR is empty in left operand",
+			in: &EgressCommonRule{
+				ToCIDR: []CIDR{},
+			},
+			other: &EgressCommonRule{
+				ToCIDR: nil,
+			},
+			expected: false,
+		},
+		{
+			name: "ToCIDRSet is nil in left operand",
+			in: &EgressCommonRule{
+				ToCIDRSet: nil,
+			},
+			other: &EgressCommonRule{
+				ToCIDRSet: []CIDRRule{},
+			},
+			expected: false,
+		},
+		{
+			name: "ToCIDRSet is empty in left operand",
+			in: &EgressCommonRule{
+				ToCIDRSet: []CIDRRule{},
+			},
+			other: &EgressCommonRule{
+				ToCIDRSet: nil,
+			},
+			expected: false,
+		},
+		{
+			name: "ToEntities is nil in left operand",
+			in: &EgressCommonRule{
+				ToEntities: nil,
+			},
+			other: &EgressCommonRule{
+				ToEntities: []Entity{},
+			},
+			expected: false,
+		},
+		{
+			name: "ToEntities is empty in left operand",
+			in: &EgressCommonRule{
+				ToEntities: []Entity{},
+			},
+			other: &EgressCommonRule{
+				ToEntities: nil,
+			},
+			expected: false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expected, tc.in.DeepEqual(tc.other))
+		})
 	}
 }

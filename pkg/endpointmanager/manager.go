@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/mcastmanager"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/metrics/metric"
@@ -627,7 +628,6 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 // RestoreEndpoint exposes the specified endpoint to other subsystems via the
 // manager.
 func (mgr *endpointManager) RestoreEndpoint(ep *endpoint.Endpoint) error {
-	ep.SetDefaultConfiguration()
 	err := mgr.expose(ep)
 	if err != nil {
 		return err
@@ -686,8 +686,9 @@ func (mgr *endpointManager) AddIngressEndpoint(
 	ipcache *ipcache.IPCache,
 	proxy endpoint.EndpointProxy,
 	allocator cache.IdentityAllocator,
+	ctMapGC ctmap.GCRunner,
 ) error {
-	ep, err := endpoint.CreateIngressEndpoint(owner, policyGetter, ipcache, proxy, allocator)
+	ep, err := endpoint.CreateIngressEndpoint(owner, policyGetter, ipcache, proxy, allocator, ctMapGC)
 	if err != nil {
 		return err
 	}
@@ -708,8 +709,9 @@ func (mgr *endpointManager) AddHostEndpoint(
 	ipcache *ipcache.IPCache,
 	proxy endpoint.EndpointProxy,
 	allocator cache.IdentityAllocator,
+	ctMapGC ctmap.GCRunner,
 ) error {
-	ep, err := endpoint.CreateHostEndpoint(owner, policyGetter, ipcache, proxy, allocator)
+	ep, err := endpoint.CreateHostEndpoint(owner, policyGetter, ipcache, proxy, allocator, ctMapGC)
 	if err != nil {
 		return err
 	}
@@ -726,7 +728,7 @@ func (mgr *endpointManager) AddHostEndpoint(
 }
 
 type policyRepoGetter interface {
-	GetPolicyRepository() *policy.Repository
+	GetPolicyRepository() policy.PolicyRepository
 }
 
 // InitHostEndpointLabels initializes the host endpoint's labels with the
@@ -801,5 +803,5 @@ func (mgr *endpointManager) GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, e
 		return 0, fmt.Errorf("endpoint not found by ip %v", ip)
 	}
 
-	return ep.GetEndpointNetnsCookie(), nil
+	return ep.NetNsCookie, nil
 }

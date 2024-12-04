@@ -7,13 +7,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	etcdAPI "go.etcd.io/etcd/client/v3"
+	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
@@ -44,7 +47,7 @@ func TestHint(t *testing.T) {
 func setupEtcdLockedSuite(tb testing.TB) *etcdAPI.Client {
 	testutils.IntegrationTest(tb)
 
-	SetupDummyWithConfigOpts(tb, "etcd", opts("etcd"))
+	SetupDummyWithConfigOpts(tb, "etcd", etcdOpts)
 
 	// setup client
 	cfg := etcdAPI.Config{}
@@ -742,7 +745,7 @@ func TestUpdateIfDifferentIfLocked(t *testing.T) {
 				require.NoError(t, err)
 				created, err := Client().CreateOnly(context.Background(), key, []byte("bar"), true)
 				require.NoError(t, err)
-				require.Equal(t, true, created)
+				require.True(t, created)
 
 				return args{
 					key:      key,
@@ -1161,7 +1164,7 @@ func TestListPrefixIfLocked(t *testing.T) {
 			// We don't compare revision of the value because we can't predict
 			// its value.
 			v1, ok := want.kvPairs[k]
-			require.Equal(t, true, ok)
+			require.True(t, ok)
 			require.EqualValues(t, v1.Data, v.Data)
 		}
 		err = tt.cleanup(args)
@@ -1408,14 +1411,29 @@ func testEtcdRateLimiter(t *testing.T, qps, count int, cmp func(require.TestingT
 	}
 }
 
+type kvWrapper struct {
+	etcdAPI.KV
+	postGet func(context.Context) error
+}
+
+func (kvw *kvWrapper) Get(ctx context.Context, key string, opts ...etcdAPI.OpOption) (*etcdAPI.GetResponse, error) {
+	res, err := kvw.KV.Get(ctx, key, opts...)
+	if err != nil {
+		return res, err
+	}
+
+	return res, kvw.postGet(ctx)
+}
+
 func TestPaginatedList(t *testing.T) {
 	testutils.IntegrationTest(t)
-	SetupDummyWithConfigOpts(t, "etcd", opts("etcd"))
+	SetupDummyWithConfigOpts(t, "etcd", etcdOpts)
 
 	const prefix = "list/paginated"
 	ctx := context.Background()
 
-	run := func(batch int) {
+	run := func(t *testing.T, batch int, withParallelOps bool) {
+		cl := Client().(*etcdClient)
 		keys := map[string]struct{}{
 			path.Join(prefix, "immortal-finch"):   {},
 			path.Join(prefix, "rare-goshawk"):     {},
@@ -1430,19 +1448,45 @@ func TestPaginatedList(t *testing.T) {
 		}
 
 		defer func(previous int) {
-			Client().(*etcdClient).listBatchSize = previous
-			require.Nil(t, Client().DeletePrefix(ctx, prefix))
-		}(Client().(*etcdClient).listBatchSize)
-		Client().(*etcdClient).listBatchSize = batch
+			cl.listBatchSize = previous
+			require.NoError(t, cl.DeletePrefix(ctx, prefix))
+		}(cl.listBatchSize)
+		cl.listBatchSize = batch
+
+		var next int64
+		if withParallelOps {
+			pkv := cl.client.KV
+			defer func() { cl.client.KV = pkv }()
+
+			cl.client.KV = &kvWrapper{
+				KV: pkv,
+				// paginatedList should observe neither upsertions nor deletions
+				// performed after that the initial chunk of entries was retrieved.
+				postGet: func(ctx context.Context) error {
+					key := path.Join(prefix, rand.String(10))
+					res, err := cl.client.Put(ctx, key, "value")
+					if err != nil {
+						return err
+					}
+
+					if next == 0 {
+						next = res.Header.Revision
+					}
+
+					_, err = cl.client.Delete(ctx, slices.Collect(maps.Keys(keys))[0])
+					return err
+				},
+			}
+		}
 
 		var expected int64
 		for key := range keys {
-			res, err := Client().(*etcdClient).client.Put(ctx, key, "value")
+			res, err := cl.client.Put(ctx, key, "value")
 			expected = res.Header.Revision
 			require.NoError(t, err)
 		}
 
-		kvs, found, err := Client().(*etcdClient).paginatedList(ctx, log, prefix)
+		kvs, found, err := cl.paginatedList(ctx, log, prefix)
 		require.NoError(t, err)
 
 		for _, kv := range kvs {
@@ -1453,20 +1497,22 @@ func TestPaginatedList(t *testing.T) {
 			delete(keys, key)
 		}
 
-		require.Len(t, keys, 0)
+		require.Empty(t, keys)
 
 		// There is no guarantee that found == expected, because new operations might have occurred in parallel.
 		if found < expected {
 			t.Fatalf("Next revision (%d) is lower than the one of the last update (%d)", found, expected)
 		}
+
+		if withParallelOps && found >= next {
+			t.Fatalf("Next revision (%d) is higher than the one of subsequent updates (%d)", found, next)
+		}
 	}
 
-	// Batch size = 1
-	run(1)
-
-	// Batch size = 4
-	run(4)
-
-	// Batch size = 11
-	run(11)
+	for _, batchSize := range []int{1, 4, 11} {
+		for _, parallelOps := range []bool{false, true} {
+			t.Run(fmt.Sprintf("batch-size-%d-parallel-ops-%t", batchSize, parallelOps),
+				func(t *testing.T) { run(t, batchSize, parallelOps) })
+		}
+	}
 }

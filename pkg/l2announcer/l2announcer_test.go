@@ -34,7 +34,6 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
-	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -75,7 +74,6 @@ func newFixture(t testing.TB) *fixture {
 		Lifecycle: &cell.DefaultLifecycle{},
 		Health:    h,
 		DaemonConfig: &option.DaemonConfig{
-			ConfigPatchMutex:         new(lock.RWMutex),
 			K8sNamespace:             "kube_system",
 			EnableL2Announcements:    true,
 			L2AnnouncerLeaseDuration: 15 * time.Second,
@@ -248,7 +246,7 @@ func TestHappyPath(t *testing.T) {
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	err = fix.announcer.processLeaderEvent(leaderElectionEvent{
 		typ:             leaderElectionLeading,
@@ -260,13 +258,13 @@ func TestHappyPath(t *testing.T) {
 	iter = fix.proxyNeighborTable.All(rtx)
 	entries = statedb.Collect(iter)
 	assert.Len(t, entries, 1)
-	assert.Equal(t, entries[0], &tables.L2AnnounceEntry{
+	assert.Equal(t, &tables.L2AnnounceEntry{
 		L2AnnounceKey: tables.L2AnnounceKey{
 			IP:               netip.MustParseAddr(svc.Spec.ExternalIPs[0]),
 			NetworkInterface: policy.Spec.Interfaces[0],
 		},
 		Origins: []resource.Key{svcKey},
-	})
+	}, entries[0])
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -336,7 +334,7 @@ func TestHappyPathPermutations(t *testing.T) {
 			rtx := fix.stateDB.ReadTxn()
 			iter := fix.proxyNeighborTable.All(rtx)
 			entries := statedb.Collect(iter)
-			assert.Len(tt, entries, 0)
+			assert.Empty(tt, entries)
 
 			if assert.Contains(tt, fix.announcer.selectedServices, serviceKey(blueService())) {
 				err = fix.announcer.processLeaderEvent(leaderElectionEvent{
@@ -350,13 +348,13 @@ func TestHappyPathPermutations(t *testing.T) {
 			iter = fix.proxyNeighborTable.All(rtx)
 			entries = statedb.Collect(iter)
 			if assert.Len(tt, entries, 1) {
-				assert.Equal(tt, entries[0], &tables.L2AnnounceEntry{
+				assert.Equal(tt, &tables.L2AnnounceEntry{
 					L2AnnounceKey: tables.L2AnnounceKey{
 						IP:               netip.MustParseAddr(blueService().Spec.ExternalIPs[0]),
 						NetworkInterface: bluePolicy().Spec.Interfaces[0],
 					},
 					Origins: []resource.Key{serviceKey(blueService())},
-				})
+				}, entries[0])
 			}
 		})
 	}
@@ -453,13 +451,13 @@ func TestPolicyRedundancy(t *testing.T) {
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
 	assert.Len(t, entries, 1)
-	assert.Equal(t, entries[0], &tables.L2AnnounceEntry{
+	assert.Equal(t, &tables.L2AnnounceEntry{
 		L2AnnounceKey: tables.L2AnnounceKey{
 			IP:               netip.MustParseAddr(svc.Spec.ExternalIPs[0]),
 			NetworkInterface: policy.Spec.Interfaces[0],
 		},
 		Origins: []resource.Key{svcKey},
-	})
+	}, entries[0])
 
 	// Delete second policy
 	idx := slices.Index(fix.fakePolicyStore.slice, policy2)
@@ -482,13 +480,13 @@ func TestPolicyRedundancy(t *testing.T) {
 	iter = fix.proxyNeighborTable.All(rtx)
 	entries = statedb.Collect(iter)
 	assert.Len(t, entries, 1)
-	assert.Equal(t, entries[0], &tables.L2AnnounceEntry{
+	assert.Equal(t, &tables.L2AnnounceEntry{
 		L2AnnounceKey: tables.L2AnnounceKey{
 			IP:               netip.MustParseAddr(svc.Spec.ExternalIPs[0]),
 			NetworkInterface: policy.Spec.Interfaces[0],
 		},
 		Origins: []resource.Key{svcKey},
-	})
+	}, entries[0])
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -520,7 +518,7 @@ func baseUpdateSetup(t *testing.T) *fixture {
 	require.NoError(t, err)
 
 	require.Len(t, fix.announcer.selectedPolicies, 1)
-	require.Len(t, fix.announcer.selectedServices, 0)
+	require.Empty(t, fix.announcer.selectedServices)
 
 	svc := blueService()
 	fix.fakeSvcStore.slice = append(fix.fakeSvcStore.slice, svc)
@@ -566,14 +564,14 @@ func TestUpdateHostLabels_NoMatch(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	assert.Len(t, fix.announcer.selectedPolicies, 0)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedPolicies)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Assert Proxy Neighbor Entry is deleted
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -685,13 +683,13 @@ func TestUpdatePolicy_NoMatch(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Assert Proxy Neighbor Entry is deleted
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -787,7 +785,7 @@ func TestPolicySelection(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Setting external and LB IP to false should not select any services anymore
 	policy.Spec.ExternalIPs = false
@@ -802,7 +800,7 @@ func TestPolicySelection(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Updating an existing non-selected service should not select it
 	svc.Spec = slim_corev1.ServiceSpec{
@@ -818,7 +816,7 @@ func TestPolicySelection(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Adding an LB IP to an existing non-selected service should not select it
 	svc.Status.LoadBalancer.Ingress = []slim_corev1.LoadBalancerIngress{
@@ -834,7 +832,7 @@ func TestPolicySelection(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	// Altering the policy to select services with LB IPs should only have an entry for LB IPs
 	policy.Spec.ExternalIPs = false
@@ -882,7 +880,7 @@ func TestPolicySelection(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 }
 
@@ -904,12 +902,12 @@ func TestUpdatePolicy_ChangeIPType(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	// Adding an LB IP should select the service and create an entry
 	svc := blueService()
@@ -961,12 +959,12 @@ func TestUpdatePolicy_ChangeIPType(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Len(t, fix.announcer.selectedPolicies, 1)
-	assert.Len(t, fix.announcer.selectedServices, 0)
+	assert.Empty(t, fix.announcer.selectedServices)
 
 	rtx = fix.stateDB.ReadTxn()
 	iter = fix.proxyNeighborTable.All(rtx)
 	entries = statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -1032,7 +1030,7 @@ func TestUpdateService_DelIP(t *testing.T) {
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -1084,7 +1082,7 @@ func TestUpdateService_NoMatch(t *testing.T) {
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -1138,7 +1136,7 @@ func TestUpdateService_LoadBalancerClassNotMatch(t *testing.T) {
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -1163,7 +1161,7 @@ func TestDelService(t *testing.T) {
 	rtx := fix.stateDB.ReadTxn()
 	iter := fix.proxyNeighborTable.All(rtx)
 	entries := statedb.Collect(iter)
-	assert.Len(t, entries, 0)
+	assert.Empty(t, entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	fix.announcer.params.JobGroup.Stop(ctx)
@@ -1185,7 +1183,6 @@ func TestL2AnnouncerLifecycle(t *testing.T) {
 		cell.Invoke(statedb.RegisterTable[*tables.Device]),
 		cell.Provide(func() *option.DaemonConfig {
 			return &option.DaemonConfig{
-				ConfigPatchMutex:      new(lock.RWMutex),
 				EnableL2Announcements: true,
 			}
 		}),

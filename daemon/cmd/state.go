@@ -12,11 +12,11 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -33,15 +33,17 @@ import (
 
 var syncLBMapsControllerGroup = controller.NewGroup("sync-lb-maps-with-k8s-services")
 
-func (d *Daemon) WaitForEndpointRestore(ctx context.Context) {
+func (d *Daemon) WaitForEndpointRestore(ctx context.Context) error {
 	if !option.Config.RestoreState {
-		return
+		return nil
 	}
 
 	select {
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-d.endpointRestoreComplete:
 	}
+	return nil
 }
 
 type endpointRestoreState struct {
@@ -52,7 +54,7 @@ type endpointRestoreState struct {
 
 // checkLink returns an error if a link with linkName does not exist.
 func checkLink(linkName string) error {
-	_, err := netlink.LinkByName(linkName)
+	_, err := safenetlink.LinkByName(linkName)
 	return err
 }
 
@@ -221,6 +223,7 @@ func (d *Daemon) restoreOldEndpoints(state *endpointRestoreState) {
 		// kvstore because the local node's IP is used as a suffix for the key
 		// in the key-value store.
 		ep.SetAllocator(d.identityAllocator)
+		ep.SetCtMapGC(d.ctMapGC)
 
 		restore, err := d.validateEndpoint(ep)
 		if err != nil {
@@ -268,8 +271,6 @@ func (d *Daemon) restoreOldEndpoints(state *endpointRestoreState) {
 }
 
 func (d *Daemon) regenerateRestoredEndpoints(state *endpointRestoreState, endpointsRegenerator *endpoint.Regenerator) {
-	d.endpointRestoreComplete = make(chan struct{})
-
 	log.WithField("numRestored", len(state.restored)).Info("Regenerating restored endpoints")
 
 	// Before regenerating, check whether the CT map has properties that
@@ -307,42 +308,7 @@ func (d *Daemon) regenerateRestoredEndpoints(state *endpointRestoreState, endpoi
 		}
 	}
 
-	if option.Config.EnableIPSec {
-		// If IPsec is enabled we need to restore the host endpoint before any
-		// other endpoint, to ensure a dropless upgrade.
-		// This code can be removed in v1.15.
-		// This is necessary because we changed how the IPsec encapsulation is
-		// done. In older version, bpf_lxc would pass the outer destination IP
-		// via skb->cb to bpf_host which would write it to the outer header.
-		// In newer versions, the header is written by the kernel XFRM
-		// subsystem and bpf_host must therefore not write it. To allow for a
-		// smooth upgrade, bpf_host has been updated to handle both cases. But
-		// for that to succeed, it must be reloaded first, before the bpf_lxc
-		// programs stop writing the IP into skb->cb.
-		for _, ep := range state.restored {
-			// Cap the timeout used to wait for remote cluster synchronization
-			// to avoid blocking the agent startup, as this regeneration is
-			// performed synchronously.
-			endpointsRegenerator.CapTimeoutForSynchronousRegeneration()
-
-			if ep.IsHost() {
-				log.WithField(logfields.EndpointID, ep.ID).Info("Successfully restored endpoint. Scheduling regeneration")
-				if err := ep.RegenerateAfterRestore(endpointsRegenerator, d.bwManager, d.fetchK8sMetadataForEndpoint); err != nil {
-					log.WithField(logfields.EndpointID, ep.ID).WithError(err).Debug("error regenerating restored host endpoint")
-					epRegenerated <- false
-				} else {
-					epRegenerated <- true
-				}
-				break
-			}
-		}
-	}
-
 	for _, ep := range state.restored {
-		if ep.IsHost() && option.Config.EnableIPSec {
-			// The host endpoint was handled above.
-			continue
-		}
 		log.WithField(logfields.EndpointID, ep.ID).Info("Successfully restored endpoint. Scheduling regeneration")
 		go func(ep *endpoint.Endpoint, epRegenerated chan<- bool) {
 			if err := ep.RegenerateAfterRestore(endpointsRegenerator, d.bwManager, d.fetchK8sMetadataForEndpoint); err != nil {
@@ -477,6 +443,9 @@ func (d *Daemon) initRestore(restoredEndpoints *endpointRestoreState, endpointsR
 								swg := lock.NewStoppableWaitGroup()
 								for _, svc := range stale {
 									d.k8sSvcCache.EnsureService(svc, swg)
+									if option.Config.EnableLocalRedirectPolicy {
+										d.lrpManager.EnsureService(svc)
+									}
 								}
 
 								swg.Stop()

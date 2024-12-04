@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -35,6 +36,17 @@ type localNodeInfo struct {
 	ipv6AllocCIDR         string
 	ipv4NativeRoutingCIDR string
 	ipv6NativeRoutingCIDR string
+}
+
+func (lni localNodeInfo) isValid() bool {
+	switch {
+	case option.Config.EnableIPv4 && (lni.internalIPv4.IsUnspecified() || lni.ipv4AllocCIDR == ""):
+		return false
+	case option.Config.EnableIPv6 && (lni.internalIPv6.IsUnspecified() || lni.ipv6AllocCIDR == ""):
+		return false
+	default:
+		return true
+	}
 }
 
 func (lni localNodeInfo) equal(other localNodeInfo) bool {
@@ -112,6 +124,10 @@ func reconciliationLoop(
 ) error {
 	// The minimum interval between reconciliation attempts
 	const minReconciliationInterval = 200 * time.Millisecond
+	// The interval between consecutive reconciliations, in case no other
+	// changes occurred at the same time, to ensure eventual consistency
+	// and correct possible divergences.
+	const fullReconciliationInterval = 30 * time.Minute
 
 	// log limiter for partial (proxy and no track rules) reconciliation errors
 	partialLogLimiter := logging.NewLimiter(10*time.Second, 3)
@@ -127,16 +143,28 @@ func reconciliationLoop(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Pull the local node until it has been initialized far enough for
+	// the reconciliation to proceed.
 	localNodeEvents := stream.ToChannel(ctx, params.localNodeStore)
-	state.localNodeInfo = toLocalNodeInfo(<-localNodeEvents)
+	for localNode := range localNodeEvents {
+		state.localNodeInfo = toLocalNodeInfo(localNode)
+		if state.localNodeInfo.isValid() {
+			break
+		}
+	}
 
 	devices, devicesWatch := tables.SelectedDevices(params.devices, params.db.ReadTxn())
 	state.devices = sets.New(tables.DeviceNames(devices)...)
 
 	// Use a ticker to limit how often the desired state is reconciled to avoid doing
 	// lots of operations when e.g. ipset updates.
-	ticker := time.NewTicker(minReconciliationInterval)
+	ticker := params.clock.NewTicker(minReconciliationInterval)
 	defer ticker.Stop()
+
+	// Refresher is a timer that allows to schedule periodic reconciliations
+	// to ensure eventual consistency and correct possible divergences.
+	refresher := params.clock.NewTimer(fullReconciliationInterval)
+	defer refresher.Stop()
 
 	// stateChanged is true when the desired state has changed or when reconciling it
 	// has failed. It's set to false when reconciling succeeds.
@@ -264,7 +292,9 @@ stop:
 			} else {
 				close(req.updated)
 			}
-		case <-ticker.C:
+		case <-refresher.C():
+			stateChanged = true
+		case <-ticker.C():
 			if !stateChanged {
 				continue
 			}
@@ -288,6 +318,19 @@ stop:
 				close(ch)
 			}
 			updatedChs = updatedChs[:0]
+
+			// Reset the timer so that it gets triggered again after fullReconciliationInterval,
+			// to avoid introducing unnecessary churn in case a full reconciliation was already
+			// triggered due to other reasons. The Stop and select steps can be dropped once
+			// switching to using go v1.23: https://go.dev/wiki/Go123Timer
+			if !refresher.Stop() {
+				select {
+				case <-ticker.C():
+				default:
+				}
+			}
+
+			refresher.Reset(fullReconciliationInterval)
 		}
 	}
 

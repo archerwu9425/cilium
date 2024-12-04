@@ -23,6 +23,24 @@ bpf_clear_meta(struct __sk_buff *ctx)
 	WRITE_ONCE(ctx->tc_classid, zero);
 }
 
+static __always_inline __maybe_unused void
+ctx_store_meta_ipv6(struct __sk_buff *ctx, const __u32 off, const union v6addr *addr)
+{
+	ctx_store_meta(ctx, off, addr->p1);
+	ctx_store_meta(ctx, off + 1, addr->p2);
+	ctx_store_meta(ctx, off + 2, addr->p3);
+	ctx_store_meta(ctx, off + 3, addr->p4);
+}
+
+static __always_inline __maybe_unused void
+ctx_load_meta_ipv6(const struct __sk_buff *ctx, union v6addr *addr, const __u32 off)
+{
+	addr->p1 = ctx_load_meta(ctx, off);
+	addr->p2 = ctx_load_meta(ctx, off + 1);
+	addr->p3 = ctx_load_meta(ctx, off + 2);
+	addr->p4 = ctx_load_meta(ctx, off + 3);
+}
+
 /**
  * get_identity - returns source identity from the mark field
  *
@@ -84,7 +102,7 @@ set_identity_mark(struct __sk_buff *ctx, __u32 identity, __u32 magic)
 	__u32 cluster_id_lower = cluster_id & 0xFF;
 	__u32 cluster_id_upper = ((cluster_id & 0xFFFFFF00) << (8 + IDENTITY_LEN));
 
-	ctx->mark |= magic;
+	ctx->mark = (magic & MARK_MAGIC_KEY_MASK);
 	ctx->mark &= MARK_MAGIC_KEY_MASK;
 	ctx->mark |= (identity & IDENTITY_MAX) << 16 | cluster_id_lower | cluster_id_upper;
 }
@@ -144,7 +162,7 @@ redirect_self(const struct __sk_buff *ctx)
 	/* Looping back the packet into the originating netns. We xmit into the
 	 * hosts' veth device such that we end up on ingress in the peer.
 	 */
-	return ctx_redirect(ctx, ctx->ifindex, 0);
+	return (int)ctx_redirect(ctx, ctx->ifindex, 0);
 }
 
 static __always_inline __maybe_unused bool
@@ -242,6 +260,14 @@ static __always_inline bool ctx_is_overlay(const struct __sk_buff *ctx)
 		return false;
 
 	return (ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_OVERLAY;
+}
+
+static __always_inline bool ctx_mark_is_wireguard(const struct __sk_buff *ctx)
+{
+	if (!is_defined(ENABLE_WIREGUARD))
+		return false;
+
+	return (ctx->mark & MARK_MAGIC_WG_ENCRYPTED) == MARK_MAGIC_WG_ENCRYPTED;
 }
 
 #ifdef ENABLE_EGRESS_GATEWAY_COMMON

@@ -12,9 +12,7 @@ import (
 
 	"github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/api/v1/server/restapi/endpoint"
-	"github.com/cilium/cilium/api/v1/server/restapi/metrics"
 	"github.com/cilium/cilium/api/v1/server/restapi/policy"
-	"github.com/cilium/cilium/api/v1/server/restapi/service"
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/promise"
@@ -23,14 +21,8 @@ import (
 type handlersOut struct {
 	cell.Out
 
-	DaemonGetCgroupDumpMetadataHandler daemon.GetCgroupDumpMetadataHandler
-	DaemonGetClusterNodesHandler       daemon.GetClusterNodesHandler
-	DaemonGetDebuginfoHandler          daemon.GetDebuginfoHandler
-	DaemonGetHealthzHandler            daemon.GetHealthzHandler
-	DaemonGetMapHandler                daemon.GetMapHandler
-	DaemonGetMapNameEventsHandler      daemon.GetMapNameEventsHandler
-	DaemonGetMapNameHandler            daemon.GetMapNameHandler
-	DaemonGetNodeIdsHandler            daemon.GetNodeIdsHandler
+	DaemonGetDebuginfoHandler daemon.GetDebuginfoHandler
+	DaemonGetHealthzHandler   daemon.GetHealthzHandler
 
 	EndpointDeleteEndpointHandler        endpoint.DeleteEndpointHandler
 	EndpointDeleteEndpointIDHandler      endpoint.DeleteEndpointIDHandler
@@ -45,8 +37,6 @@ type handlersOut struct {
 	EndpointPatchEndpointIDLabelsHandler endpoint.PatchEndpointIDLabelsHandler
 	EndpointPutEndpointIDHandler         endpoint.PutEndpointIDHandler
 
-	MetricsGetMetricsHandler metrics.GetMetricsHandler
-
 	PolicyDeleteFqdnCacheHandler      policy.DeleteFqdnCacheHandler
 	PolicyDeletePolicyHandler         policy.DeletePolicyHandler
 	PolicyGetFqdnCacheHandler         policy.GetFqdnCacheHandler
@@ -59,11 +49,6 @@ type handlersOut struct {
 	PolicyGetPolicyHandler            policy.GetPolicyHandler
 	PolicyGetPolicySelectorsHandler   policy.GetPolicySelectorsHandler
 	PolicyPutPolicyHandler            policy.PutPolicyHandler
-
-	ServiceDeleteServiceIDHandler service.DeleteServiceIDHandler
-	ServiceGetServiceHandler      service.GetServiceHandler
-	ServiceGetServiceIDHandler    service.GetServiceIDHandler
-	ServicePutServiceIDHandler    service.PutServiceIDHandler
 }
 
 // apiHandler implements Handle() for the given parameter type.
@@ -105,17 +90,6 @@ func ciliumAPIHandlers(dp promise.Promise[*Daemon], cfg *option.DaemonConfig, _ 
 	// /healthz/
 	out.DaemonGetHealthzHandler = wrapAPIHandler(dp, getHealthzHandler)
 
-	// /service/
-	out.ServiceGetServiceHandler = wrapAPIHandler(dp, getServiceHandler)
-
-	// /service/{id}/
-	out.ServiceGetServiceIDHandler = wrapAPIHandler(dp, getServiceIDHandler)
-	out.ServiceDeleteServiceIDHandler = wrapAPIHandler(dp, deleteServiceIDHandler)
-	out.ServicePutServiceIDHandler = wrapAPIHandler(dp, putServiceIDHandler)
-
-	// /cluster/nodes
-	out.DaemonGetClusterNodesHandler = NewGetClusterNodesHandler(dp)
-
 	// /endpoint/
 	out.EndpointDeleteEndpointHandler = wrapAPIHandler(dp, deleteEndpointHandler)
 	out.EndpointGetEndpointHandler = wrapAPIHandler(dp, getEndpointHandler)
@@ -156,17 +130,6 @@ func ciliumAPIHandlers(dp promise.Promise[*Daemon], cfg *option.DaemonConfig, _ 
 	// /debuginfo
 	out.DaemonGetDebuginfoHandler = wrapAPIHandler(dp, getDebugInfoHandler)
 
-	// /cgroup-dump-metadata
-	out.DaemonGetCgroupDumpMetadataHandler = wrapAPIHandler(dp, getCgroupDumpMetadataHandler)
-
-	// /map
-	out.DaemonGetMapHandler = wrapAPIHandler(dp, getMapHandler)
-	out.DaemonGetMapNameHandler = wrapAPIHandler(dp, getMapNameHandler)
-	out.DaemonGetMapNameEventsHandler = wrapAPIHandler(dp, getMapNameEventsHandler)
-
-	// metrics
-	out.MetricsGetMetricsHandler = wrapAPIHandler(dp, getMetricsHandler)
-
 	// /fqdn/cache
 	out.PolicyGetFqdnCacheHandler = wrapAPIHandler(dp, getFqdnCacheHandler)
 	out.PolicyDeleteFqdnCacheHandler = wrapAPIHandler(dp, deleteFqdnCacheHandler)
@@ -175,9 +138,6 @@ func ciliumAPIHandlers(dp promise.Promise[*Daemon], cfg *option.DaemonConfig, _ 
 
 	// /ip/
 	out.PolicyGetIPHandler = wrapAPIHandler(dp, getIPHandler)
-
-	// /node/ids
-	out.DaemonGetNodeIdsHandler = wrapAPIHandler(dp, getNodeIDHandlerHandler)
 
 	return
 }

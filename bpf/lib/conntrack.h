@@ -96,7 +96,7 @@ static __always_inline __u32 __ct_update_timeout(struct ct_entry *entry,
 						 union tcp_flags flags,
 						 __u8 report_mask)
 {
-	__u32 now = bpf_mono_now();
+	__u32 now = (__u32)bpf_mono_now();
 	__u8 accumulated_flags;
 	__u8 seen_flags = flags.lower_bits & report_mask;
 	__u32 last_report;
@@ -193,7 +193,7 @@ ct_lookup_fill_state(struct ct_state *state, const struct ct_entry *entry,
 {
 	state->rev_nat_index = entry->rev_nat_index;
 	if (dir == CT_SERVICE) {
-		state->backend_id = entry->backend_id;
+		state->backend_id = (__u32)entry->backend_id;
 		state->syn = syn;
 	} else if (dir == CT_INGRESS || dir == CT_EGRESS) {
 #ifndef DISABLE_LOOPBACK_LB
@@ -329,20 +329,28 @@ __ct_lookup(const void *map, struct __ctx_buff *ctx, const void *tuple,
 			break;
 
 		case ACTION_CLOSE:
-			/* If we got an RST and have not seen both SYNs,
-			 * terminate the connection. (For CT_SERVICE, we do not
-			 * see both directions, so flags of established
-			 * connections would not include both SYNs.)
-			 */
-			if (!ct_entry_seen_both_syns(entry) &&
-			    (seen_flags.value & TCP_FLAG_RST) &&
-			    dir != CT_SERVICE) {
+			switch (dir) {
+			case CT_SERVICE:
+				/* We only see the forward direction. Close both
+				 * directions to make the ct_entry_alive() check
+				 * below behave as expected.
+				 */
 				entry->rx_closing = 1;
 				entry->tx_closing = 1;
-			} else if (dir == CT_INGRESS) {
-				entry->rx_closing = 1;
-			} else {
-				entry->tx_closing = 1;
+				break;
+			default:
+				/* If we got an RST and have not seen both SYNs,
+				 * terminate the connection.
+				 */
+				if (!ct_entry_seen_both_syns(entry) &&
+				    (seen_flags.value & TCP_FLAG_RST)) {
+					entry->rx_closing = 1;
+					entry->tx_closing = 1;
+				} else if (dir == CT_INGRESS) {
+					entry->rx_closing = 1;
+				} else {
+					entry->tx_closing = 1;
+				}
 			}
 			if (ct_state)
 				ct_state->closing = 1;
@@ -628,18 +636,22 @@ ct_lazy_lookup6(const void *map, struct ipv6_ct_tuple *tuple,
 static __always_inline int ct_lookup6(const void *map,
 				      struct ipv6_ct_tuple *tuple,
 				      struct __ctx_buff *ctx, int l4_off,
-				      enum ct_dir dir, struct ct_state *ct_state,
+				      enum ct_dir dir, enum ct_scope scope,
+				      struct ct_state *ct_state,
 				      __u32 *monitor)
 {
 	int ret;
 
-	tuple->flags = ct_lookup_select_tuple_type(dir, SCOPE_BIDIR);
+	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
 	ret = ct_extract_ports6(ctx, l4_off, tuple);
 	if (ret < 0)
 		return ret;
 
-	return __ct_lookup6(map, tuple, ctx, l4_off, dir, SCOPE_BIDIR,
+	if (scope == SCOPE_FORWARD)
+		__ipv6_ct_tuple_reverse(tuple);
+
+	return __ct_lookup6(map, tuple, ctx, l4_off, dir, scope,
 			    CT_ENTRY_ANY, ct_state, monitor);
 }
 
@@ -897,21 +909,24 @@ ct_lazy_lookup4(const void *map, struct ipv4_ct_tuple *tuple, struct __ctx_buff 
 static __always_inline int ct_lookup4(const void *map,
 				      struct ipv4_ct_tuple *tuple,
 				      struct __ctx_buff *ctx, struct iphdr *ip4,
-				      int off, enum ct_dir dir,
+				      int off, enum ct_dir dir, enum ct_scope scope,
 				      struct ct_state *ct_state, __u32 *monitor)
 {
 	bool is_fragment = ipv4_is_fragment(ip4);
 	bool has_l4_header = true;
 	int ret;
 
-	tuple->flags = ct_lookup_select_tuple_type(dir, SCOPE_BIDIR);
+	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
 	ret = ct_extract_ports4(ctx, ip4, off, dir, tuple, &has_l4_header);
 	if (ret < 0)
 		return ret;
 
+	if (scope == SCOPE_FORWARD)
+		__ipv4_ct_tuple_reverse(tuple);
+
 	return __ct_lookup4(map, tuple, ctx, off, has_l4_header, is_fragment,
-			    dir, SCOPE_BIDIR, CT_ENTRY_ANY, ct_state, monitor);
+			    dir, scope, CT_ENTRY_ANY, ct_state, monitor);
 }
 
 static __always_inline void

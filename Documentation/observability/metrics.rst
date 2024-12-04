@@ -88,6 +88,8 @@ option is set in the ``scrape_configs`` section:
           replacement: ${1}:${2}
           target_label: __address__
 
+.. _hubble_metrics:
+
 Hubble Metrics
 ==============
 
@@ -118,6 +120,9 @@ section for the full list of available metrics and their options.
 
 The port of the Hubble metrics can be configured with the
 ``hubble.metrics.port`` Helm value.
+
+For details on enabling Hubble metrics with TLS see the
+:ref:`hubble_configure_metrics_tls` section of the documentation.
 
 .. Note::
 
@@ -307,12 +312,14 @@ Name                                       Labels                               
 Node Connectivity
 ~~~~~~~~~~~~~~~~~
 
-========================================== ====================================================================================================================================================================== ========== ===================================================================================================================
-Name                                       Labels                                                                                                                                                                 Default    Description
-========================================== ====================================================================================================================================================================== ========== ===================================================================================================================
-``node_connectivity_status``               ``source_cluster``, ``source_node_name``, ``target_cluster``, ``target_node_name``, ``target_node_type``, ``type``                                                     Enabled    The last observed status of both ICMP and HTTP connectivity between the current Cilium agent and other Cilium nodes
-``node_connectivity_latency_seconds``      ``address_type``, ``protocol``, ``source_cluster``, ``source_node_name``, ``target_cluster``, ``target_node_ip``, ``target_node_name``, ``target_node_type``, ``type`` Enabled    The last observed latency between the current Cilium agent and other Cilium nodes in seconds
-========================================== ====================================================================================================================================================================== ========== ===================================================================================================================
+============================================= ====================================================================================================================================================================== ========== ==================================================================================================================================================================================================================
+Name                                          Labels                                                                                                                                                                 Default    Description
+============================================= ====================================================================================================================================================================== ========== ==================================================================================================================================================================================================================
+``node_connectivity_status``                  ``source_cluster``, ``source_node_name``, ``target_cluster``, ``target_node_name``, ``target_node_type``, ``type``                                                     Enabled    Deprecated, will be removed in Cilium 1.18 - use ``node_health_connectivity_status`` instead. The last observed status of both ICMP and HTTP connectivity between the current Cilium agent and other Cilium nodes
+``node_connectivity_latency_seconds``         ``address_type``, ``protocol``, ``source_cluster``, ``source_node_name``, ``target_cluster``, ``target_node_ip``, ``target_node_name``, ``target_node_type``, ``type`` Enabled    Deprecated, will be removed in Cilium 1.18 - use ``node_health_connectivity_latency_seconds`` instead. The last observed latency between the current Cilium agent and other Cilium nodes in seconds
+``node_health_connectivity_status``           ``source_cluster``, ``source_node_name``, ``type``, ``status``                                                                                                         Enabled    Number of endpoints with last observed status of both ICMP and HTTP connectivity between the current Cilium agent and other Cilium nodes
+``node_health_connectivity_latency_seconds``  ``source_cluster``, ``source_node_name``, ``type``, ``address_type``, ``protocol``                                                                                     Enabled    Histogram of the last observed latency between the current Cilium agent and other Cilium nodes in seconds
+============================================= ====================================================================================================================================================================== ========== ==================================================================================================================================================================================================================
 
 Clustermesh
 ~~~~~~~~~~~
@@ -398,6 +405,7 @@ Name                                       Labels                               
 ``policy_change_total``                                                                       Enabled    Number of policy changes by outcome
 ``policy_endpoint_enforcement_status``                                                        Enabled    Number of endpoints labeled by policy enforcement status
 ``policy_implementation_delay``            ``source``                                         Enabled    Time in seconds between a policy change and it being fully deployed into the datapath, labeled by the policy's source
+``policy_selector_match_count_max``        ``class``                                          Enabled    The maximum number of identities selected by a network policy selector
 ========================================== ================================================== ========== ========================================================
 
 Policy L7 (HTTP/Kafka/FQDN)
@@ -420,6 +428,9 @@ Name                                     Labels                                 
 ======================================== ================================================== ========== ========================================================
 ``identity``                             ``type``                                           Enabled    Number of identities currently allocated
 ``identity_label_sources``               ``source``                                         Enabled    Number of identities which contain at least one label from the given label source
+``identity_gc_entries``                  ``identity_type``                                  Enabled    Number of alive and deleted identities at the end of a garbage collector run
+``identity_gc_runs``                     ``outcome``, ``identity_type``                     Enabled    Number of times identity garbage collector has run
+``identity_gc_latency``                  ``outcome``, ``identity_type``                     Enabled    Duration of the last successful identity GC run
 ``ipcache_errors_total``                 ``type``, ``error``                                Enabled    Number of errors interacting with the ipcache
 ``ipcache_events_total``                 ``type``                                           Enabled    Number of events interacting with the ipcache
 ======================================== ================================================== ========== ========================================================
@@ -594,13 +605,13 @@ Name                                           Labels                           
 BGP Control Plane
 ~~~~~~~~~~~~~~~~~
 
-====================== ============================================= ======== ===================================================================
-Name                   Labels                                        Default  Description
-====================== ============================================= ======== ===================================================================
-``session_state``      ``vrouter``, ``neighbor``                     Enabled  Current state of the BGP session with the peer, Up = 1 or Down = 0
-``advertised_routes``  ``vrouter``, ``neighbor``, ``afi``, ``safi``  Enabled  Number of routes advertised to the peer
-``received_routes``    ``vrouter``, ``neighbor``, ``afi``, ``safi``  Enabled  Number of routes received from the peer
-====================== ============================================= ======== ===================================================================
+====================== =============================================================== ======== ===================================================================
+Name                   Labels                                                          Default  Description
+====================== =============================================================== ======== ===================================================================
+``session_state``      ``vrouter``, ``neighbor``, ``neighbor_asn``                     Enabled  Current state of the BGP session with the peer, Up = 1 or Down = 0
+``advertised_routes``  ``vrouter``, ``neighbor``, ``neighbor_asn``, ``afi``, ``safi``  Enabled  Number of routes advertised to the peer
+``received_routes``    ``vrouter``, ``neighbor``, ``neighbor_asn``, ``afi``, ``safi``  Enabled  Number of routes received from the peer
+====================== =============================================================== ======== ===================================================================
 
 All metrics are enabled only when the BGP Control Plane is enabled.
 
@@ -693,6 +704,29 @@ Name                                           Labels                           
 ``ces_queueing_delay_seconds``                                                  CiliumEndpointSlice queueing delay in seconds
 ============================================== ================================ ========================================================
 
+Unmanaged Pods
+~~~~~~~~~~~~~~
+
+============================================ ======= ========== ====================================================================
+Name                                         Labels  Default    Description
+============================================ ======= ========== ====================================================================
+``unmanaged_pods``                                   Enabled    The total number of pods observed to be unmanaged by Cilium operator
+============================================ ======= ========== ====================================================================
+
+"Double Write" Identity Allocation Mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When the ":ref:`Double Write <double_write_migration>`" identity allocation mode is
+enabled, the following metrics are available:
+
+============================================ ======= ========== ============================================================
+Name                                         Labels  Default    Description
+============================================ ======= ========== ============================================================
+``doublewrite_identity_crd_total_count``             Enabled    The total number of CRD identities
+``doublewrite_identity_kvstore_total_count``         Enabled    The total number of identities in the KVStore
+``doublewrite_identity_crd_only_count``              Enabled    The number of CRD identities not present in the KVStore
+``doublewrite_identity_kvstore_only_count``          Enabled    The number of identities in the KVStore not present as a CRD
+============================================ ======= ========== ============================================================
+
 
 Hubble
 ------
@@ -706,6 +740,8 @@ The command-line options to configure them are ``--enable-hubble``,
 ``--hubble-metrics-server`` takes an ``IP:Port`` pair, but
 passing an empty IP (e.g. ``:9965``) will bind the server to all available
 interfaces. ``--hubble-metrics`` takes a comma-separated list of metrics.
+It's also possible to configure Hubble metrics to listen with TLS and
+optionally use mTLS for authentication. For details see :ref:`hubble_configure_metrics_tls`.
 
 Some metrics can take additional semicolon-separated options per metric, e.g.
 ``--hubble-metrics="dns:query;ignoreAAAA,http:destinationContext=workload-name"``
@@ -1277,6 +1313,8 @@ for all controller groups. The special name "none" is also supported.
 NAT
 ~~~
 
+.. _nat_metrics:
+
 ======================================== ================================================== ========== ========================================================
 Name                                     Labels                                             Default    Description
 ======================================== ================================================== ========== ========================================================
@@ -1289,7 +1327,7 @@ The NAT map holds mappings for masqueraded connections. Connection held in the N
 same egress-IP and are going to the same remote endpoints IP and port all require a unique source port for the mapping.
 This means that any Node masquerading connections to a distinct external endpoint is limited by the possible ephemeral source ports.
 
-Given a Node forwarding one or more such egress-IP and remote endpoint tuples, the ```nat_endpoint_max_connection``` metric is the most saturated such connection in terms of a percent of possible source ports available.
+Given a Node forwarding one or more such egress-IP and remote endpoint tuples, the ``nat_endpoint_max_connection`` metric is the most saturated such connection in terms of a percent of possible source ports available.
 This metric is especially useful when using the egress gateway feature where it's possible to overload a Node if many connections are all going to the same endpoint.
 In general, this metric should normally be fairly low.
 A high number here may indicate that a Node is reaching its limit for connections to one or more external endpoints.

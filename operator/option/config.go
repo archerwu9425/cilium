@@ -21,26 +21,6 @@ const (
 	// EndpointGCIntervalDefault is the default time for the CEP GC
 	EndpointGCIntervalDefault = 5 * time.Minute
 
-	// CESMaxCEPsInCESDefault is the maximum number of cilium endpoints allowed in a CES
-	CESMaxCEPsInCESDefault = 100
-
-	// CESSlicingModeDefault is default method for grouping CEP in a CES.
-	CESSlicingModeDefault = "cesSliceModeIdentity"
-
-	// CESWriteQPSLimitDefault is the default rate limit for the CES work queue.
-	CESWriteQPSLimitDefault = 10
-
-	// CESWriteQPSLimitMax is the maximum rate limit for the CES work queue.
-	// CES work queue QPS limit cannot exceed this value, regardless of other config.
-	CESWriteQPSLimitMax = 50
-
-	// CESWriteQPSBurstDefault is the default burst rate for the CES work queue.
-	CESWriteQPSBurstDefault = 20
-
-	// CESWriteQPSBurstMax is the maximum burst rate for the CES work queue.
-	// CES work queue QPS burst cannot exceed this value, regardless of other config.
-	CESWriteQPSBurstMax = 100
-
 	// PprofAddressOperator is the default value for pprof in the operator
 	PprofAddressOperator = "localhost"
 
@@ -52,13 +32,6 @@ const (
 )
 
 const (
-	// BGPAnnounceLBIP announces service IPs of type LoadBalancer via BGP beta (deprecated)
-	BGPAnnounceLBIP = "bgp-announce-lb-ip"
-
-	// BGPConfigPath is the file path to the BGP configuration. It is
-	// compatible with MetalLB's configuration.
-	BGPConfigPath = "bgp-config-path"
-
 	// EnableMetrics enables prometheus metrics.
 	EnableMetrics = "enable-metrics"
 
@@ -94,7 +67,8 @@ const (
 	// IPAMSubnetsTags are optional tags used to filter subnets, and interfaces within those subnets
 	IPAMSubnetsTags = "subnet-tags-filter"
 
-	// IPAMInstanceTagFilter are optional tags used to filter instances for ENI discovery ; only used with AWS IPAM mode for now
+	// IPAMInstanceTags are optional tags used to filter instances for ENI discovery.
+	// Only used with AWS and Alibabacloud IPAM mode for now
 	IPAMInstanceTags = "instance-tags-filter"
 
 	// IPAMAutoCreateCiliumPodIPPools contains pre-defined IP pools to be auto-created on startup.
@@ -202,9 +176,6 @@ const (
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs = "alibaba-cloud-release-excess-ips"
 
-	// LoadBalancerL7 enables loadbalancer capabilities for services via envoy proxy
-	LoadBalancerL7 = "loadbalancer-l7"
-
 	// ProxyIdleTimeoutSeconds is the idle timeout for proxy connections to upstream clusters
 	ProxyIdleTimeoutSeconds = "proxy-idle-timeout-seconds"
 
@@ -218,6 +189,10 @@ const (
 	// CiliumPodLabels specifies the pod labels that Cilium pods is running
 	// with.
 	CiliumPodLabels = "cilium-pod-labels"
+
+	// TaintSyncWorkers is the number of workers used to synchronize
+	// taints and conditions in Kubernetes nodes.
+	TaintSyncWorkers = "taint-sync-workers"
 
 	// RemoveCiliumNodeTaints is the flag to define if the Cilium node taint
 	// should be removed in Kubernetes nodes.
@@ -238,7 +213,6 @@ const (
 
 // OperatorConfig is the configuration used by the operator.
 type OperatorConfig struct {
-
 	// NodesGCInterval is the GC interval for CiliumNodes
 	NodesGCInterval time.Duration
 
@@ -272,13 +246,6 @@ type OperatorConfig struct {
 	// retries of the actions in operator HA deployment.
 	LeaderElectionRetryPeriod time.Duration
 
-	// BGPAnnounceLBIP announces service IPs of type LoadBalancer via BGP beta (deprecated)
-	BGPAnnounceLBIP bool
-
-	// BGPConfigPath is the file path to the BGP configuration. It is
-	// compatible with MetalLB's configuration.
-	BGPConfigPath string
-
 	// IPAM options
 
 	// IPAMAPIBurst is the burst value allowed when accessing external IPAM APIs
@@ -293,7 +260,8 @@ type OperatorConfig struct {
 	// IPAMSubnetsTags are optional tags used to filter subnets, and interfaces within those subnets
 	IPAMSubnetsTags map[string]string
 
-	// IPAMUInstanceTags are optional tags used to filter AWS EC2 instances, and interfaces (ENI) attached to them
+	// IPAMInstanceTags are optional tags used to filter instances for ENI discovery.
+	// Only used with AWS and Alibabacloud IPAM mode for now
 	IPAMInstanceTags map[string]string
 
 	// IPAM Operator options
@@ -390,9 +358,6 @@ type OperatorConfig struct {
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs bool
 
-	// LoadBalancerL7 enables loadbalancer capabilities for services.
-	LoadBalancerL7 string
-
 	// EnableGatewayAPI enables support of Gateway API
 	EnableGatewayAPI bool
 
@@ -405,6 +370,10 @@ type OperatorConfig struct {
 	// CiliumPodLabels specifies the pod labels that Cilium pods is running
 	// with.
 	CiliumPodLabels string
+
+	// TaintSyncWorkers is the number of workers used to synchronize
+	// taints and conditions in Kubernetes nodes.
+	TaintSyncWorkers int
 
 	// RemoveCiliumNodeTaints is the flag to define if the Cilium node taint
 	// should be removed in Kubernetes nodes.
@@ -437,15 +406,13 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.LeaderElectionLeaseDuration = vp.GetDuration(LeaderElectionLeaseDuration)
 	c.LeaderElectionRenewDeadline = vp.GetDuration(LeaderElectionRenewDeadline)
 	c.LeaderElectionRetryPeriod = vp.GetDuration(LeaderElectionRetryPeriod)
-	c.BGPAnnounceLBIP = vp.GetBool(BGPAnnounceLBIP)
-	c.BGPConfigPath = vp.GetString(BGPConfigPath)
-	c.LoadBalancerL7 = vp.GetString(LoadBalancerL7)
 	c.EnableGatewayAPI = vp.GetBool(EnableGatewayAPI)
 	c.ProxyIdleTimeoutSeconds = vp.GetInt(ProxyIdleTimeoutSeconds)
 	if c.ProxyIdleTimeoutSeconds == 0 {
 		c.ProxyIdleTimeoutSeconds = DefaultProxyIdleTimeoutSeconds
 	}
 	c.CiliumPodLabels = vp.GetString(CiliumPodLabels)
+	c.TaintSyncWorkers = vp.GetInt(TaintSyncWorkers)
 	c.RemoveCiliumNodeTaints = vp.GetBool(RemoveCiliumNodeTaints)
 	c.SetCiliumNodeTaints = vp.GetBool(SetCiliumNodeTaints)
 	c.SetCiliumIsUpCondition = vp.GetBool(SetCiliumIsUpCondition)
@@ -459,12 +426,6 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 		} else {
 			c.CiliumK8sNamespace = option.Config.K8sNamespace
 		}
-	}
-
-	if c.BGPAnnounceLBIP {
-		c.SyncK8sServices = true
-		log.Infof("Auto-set %q to `true` because BGP support requires synchronizing services.",
-			SyncK8sServices)
 	}
 
 	// IPAM options

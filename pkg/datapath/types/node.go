@@ -10,6 +10,7 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath/tables"
+	"github.com/cilium/cilium/pkg/datapath/xdp"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
 
@@ -24,6 +25,8 @@ type MTUConfiguration interface {
 // This configuration struct is immutable even when passed by reference.
 // When the configuration is changed at runtime a new instance is allocated
 // and passed down.
+//
+// +deepequal-gen=true
 type LocalNodeConfiguration struct {
 	// NodeIPv4 is the primary IPv4 address of this node.
 	// Mutable at runtime.
@@ -53,6 +56,12 @@ type LocalNodeConfiguration struct {
 	// Immutable at runtime.
 	AllocCIDRIPv6 *cidr.CIDR
 
+	// NativeRoutingCIDRIPv4 is the v4 CIDR in which pod IPs are routable.
+	NativeRoutingCIDRIPv4 *cidr.CIDR
+
+	// NativeRoutingCIDRIPv6 is the v4 CIDR in which pod IPs are routable.
+	NativeRoutingCIDRIPv6 *cidr.CIDR
+
 	// LoopbackIPv4 is the IPv4 loopback address.
 	// Immutable at runtime.
 	LoopbackIPv4 net.IP
@@ -61,11 +70,19 @@ type LocalNodeConfiguration struct {
 	// Mutable at runtime.
 	Devices []*tables.Device
 
+	// DirectRoutingDevice is the device used in direct routing mode.
+	// Mutable at runtime.
+	DirectRoutingDevice *tables.Device
+
 	// NodeAddresses are the IP addresses of the local node that are considered
 	// as this node's addresses. From this set we pick the addresses that are
 	// used as NodePort frontends and the addresses to use for BPF masquerading.
 	// Mutable at runtime.
 	NodeAddresses []tables.NodeAddress
+
+	// DeriveMasqIPAddrFromDevice overrides the interface name to use for deriving
+	// the masquerading IP address for the node.
+	DeriveMasqIPAddrFromDevice string
 
 	// HostEndpointID is the endpoint ID assigned to the host endpoint.
 	// Immutable at runtime.
@@ -147,22 +164,38 @@ type LocalNodeConfiguration struct {
 	// EnableIPSecEncryptedOverlay enables IPSec routes for overlay traffic
 	EnableIPSecEncryptedOverlay bool
 
-	// EncryptNode enables encrypting NodeIP traffic requires EnableIPSec
+	// EncryptNode enables encrypting NodeIP traffic
 	EncryptNode bool
 
 	// IPv4PodSubnets is a list of IPv4 subnets that pod IPs are assigned from
 	// these are then used when encryption is enabled to configure the node
 	// for encryption over these subnets at node initialization.
-	IPv4PodSubnets []*net.IPNet
+	IPv4PodSubnets []*cidr.CIDR
 
 	// IPv6PodSubnets is a list of IPv6 subnets that pod IPs are assigned from
 	// these are then used when encryption is enabled to configure the node
 	// for encryption over these subnets at node initialization.
-	IPv6PodSubnets []*net.IPNet
+	IPv6PodSubnets []*cidr.CIDR
+
+	// XDPConfig holds configuration options to determine how the node should
+	// handle XDP programs.
+	XDPConfig xdp.Config
+
+	// RoutingMode is the current routing mode of the local node.
+	// Can be 'native' or 'tunnel'.
+	RoutingMode string
 }
 
 func (cfg *LocalNodeConfiguration) DeviceNames() []string {
 	return tables.DeviceNames(cfg.Devices)
+}
+
+func (cfg *LocalNodeConfiguration) GetIPv4PodSubnets() []*net.IPNet {
+	return cidr.CIDRsToIPNets(cfg.IPv4PodSubnets)
+}
+
+func (cfg *LocalNodeConfiguration) GetIPv6PodSubnets() []*net.IPNet {
+	return cidr.CIDRsToIPNets(cfg.IPv6PodSubnets)
 }
 
 // NodeHandler handles node related events such as addition, update or deletion

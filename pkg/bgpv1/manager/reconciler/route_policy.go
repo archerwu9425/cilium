@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +68,12 @@ func (r *RoutePolicyReconciler) Priority() int {
 	// This is not a hard requirement, just to avoid some warnings.
 	return 70
 }
+
+func (r *RoutePolicyReconciler) Init(_ *instance.ServerWithConfig) error {
+	return nil
+}
+
+func (r *RoutePolicyReconciler) Cleanup(_ *instance.ServerWithConfig) {}
 
 func (r *RoutePolicyReconciler) Reconcile(ctx context.Context, params ReconcileParams) error {
 	l := log.WithFields(logrus.Fields{"component": "RoutePolicyReconciler"})
@@ -285,8 +292,8 @@ func (r *RoutePolicyReconciler) pathAttributesToPolicy(attrs v2alpha1api.CiliumB
 			return nil, err
 		}
 		largeCommunities = dedupLargeCommunities(attrs.Communities.Large)
-		sort.Strings(communities)
-		sort.Strings(largeCommunities)
+		slices.Sort(communities)
+		slices.Sort(largeCommunities)
 	}
 
 	// Due to a GoBGP limitation, we need to generate a separate statement for v4 and v6 prefixes, as families

@@ -7,6 +7,7 @@ export LC_NUMERIC=C
 
 IMG_OWNER=${1:-cilium}
 IMG_TAG=${2:-latest}
+CILIUM_EXTRA_ARGS=${3:-}
 
 ###########
 #  SETUP  #
@@ -65,14 +66,14 @@ docker exec -t lb-node \
     cilium-agent \
     --enable-ipv4=true \
     --enable-ipv6=false \
+    --enable-k8s=false \
     --datapath-mode=lb-only \
-    --bpf-lb-external-control-plane=true \
     --bpf-lb-algorithm=maglev \
     --bpf-lb-dsr-dispatch=ipip \
     --bpf-lb-acceleration=native \
     --bpf-lb-mode=dsr \
     --devices="eth0,l4lb-veth1" \
-    --direct-routing-device=eth0
+    --direct-routing-device=eth0 ${CILIUM_EXTRA_ARGS}
 
 IFIDX=$(docker exec -i lb-node \
     /bin/sh -c 'echo $(( $(ip -o l show eth0 | awk "{print $1}" | cut -d: -f1) ))')

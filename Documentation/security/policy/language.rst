@@ -256,15 +256,9 @@ accessible from endpoints that have both labels ``env=prod`` and
 Services based
 --------------
 
-.. note::
-
-	Services based rules rules will only take effect on Kubernetes services
-        without a selector.
-
 Traffic from pods to services running in your cluster can be allowed via
 ``toServices`` statements in Egress rules. Currently Kubernetes
-`Services without a Selector
-<https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors>`_
+`Services <https://kubernetes.io/docs/concepts/services-networking/service>`_
 are supported when defined by their name and namespace or label selector.
 For services backed by pods, use `Endpoints Based` rules on the backend pod
 labels.
@@ -288,8 +282,8 @@ namespace ``default``.
         .. literalinclude:: ../../../examples/policies/l3/service/service.json
 
 This example shows how to allow all endpoints with the label ``id=app2``
-to talk to all endpoints of all kubernetes services without selectors which
-have ``external:yes`` set as the label.
+to talk to all endpoints of all kubernetes services which
+have ``serviceName:myservice`` set as the label.
 
 .. only:: html
 
@@ -304,12 +298,6 @@ have ``external:yes`` set as the label.
 .. only:: epub or latex
 
         .. literalinclude:: ../../../examples/policies/l3/service/service-labels.json
-
-Limitations
-~~~~~~~~~~~
-
-``toServices`` statements must not be combined with ``toPorts`` statements in the
-same rule. If a rule combines both these statements, the policy is rejected.
 
 .. _Entities based:
 
@@ -964,8 +952,9 @@ latter rule will have no effect.
           endpoint. This might change in the future when support for ranges is
           added.
 
-.. note:: Layer 7 rules are not currently supported in `HostPolicies`, i.e.,
-          policies that use :ref:`NodeSelector`.
+.. note:: In `HostPolicies`, i.e. policies that use :ref:`NodeSelector`,
+          only DNS layer 7 rules are currently supported.
+          Other types of layer 7 rules are not supported in `HostPolicies`.
 
 .. note:: Layer 7 policies will proxy traffic through a node-local :ref:`envoy`
           instance, which will either be deployed as a DaemonSet or embedded in the agent pod.
@@ -1354,6 +1343,39 @@ Deny policies do not support: policy enforcement at L7, i.e., specifically
 denying an URL and ``toFQDNs``, i.e., specifically denying traffic to a specific
 domain name.
 
+.. _disk_policies:
+
+Disk based Cilium Network Policies
+==================================
+This functionality enables users to place network policy YAML files directly into
+the node's filesystem, bypassing the need for definition via k8s CRD. 
+By setting the config field ``static-cnp-path``, users specify the directory from 
+which policies will be loaded. The Cilium agent then processes all policy YAML files 
+present in this directory, transforming them into rules that are incorporated into 
+the policy engine. Additionally, the Cilium agent monitors this directory for any 
+new policy YAML files as well as any updates or deletions, making corresponding 
+updates to the policy engine's rules. It is important to note that this feature 
+only supports CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy.
+
+The directory that the Cilium agent needs to monitor should be mounted from the host 
+using volume mounts. For users deploying via Helm, this can be enabled via ``extraArgs``
+and ``extraHostPathMounts`` as follows:
+
+.. code-block:: yaml
+
+   extraArgs:                                                                                                                                        
+   - --static-cnp-path=/policies                                                                                                                   
+   extraHostPathMounts:                                                                                                                              
+   - name: static-policies                                                                                                                         
+      mountPath: /policies                                                                                                                          
+      hostPath: /policies                                                                                                                           
+      hostPathType: Directory  
+
+To determine whether a policy was established via Kubernetes CRD or directly from a directory, 
+execute the command ``cilium policy get`` and examine the source attribute within the policy. 
+In output, you could notice policies that have been sourced from a directory will have the 
+``source`` field set as ``directory``. Additionally, ``cilium endpoint get <endpoint_id>`` also have 
+fields to show the source of policy associated with that endpoint.
 
 Previous limitations and known issues
 -------------------------------------

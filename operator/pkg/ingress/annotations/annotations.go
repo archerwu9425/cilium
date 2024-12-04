@@ -10,8 +10,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/utils/ptr"
 
-	"github.com/cilium/cilium/operator/pkg/model"
 	"github.com/cilium/cilium/pkg/annotation"
 )
 
@@ -35,13 +35,8 @@ const (
 )
 
 const (
-	enabled                          = "enabled"
-	disabled                         = "disabled"
-	defaultTCPKeepAliveEnabled       = 1  // 1 - Enabled, 0 - Disabled
-	defaultTCPKeepAliveInitialIdle   = 10 // in seconds
-	defaultTCPKeepAliveProbeInterval = 5  // in seconds
-	defaultTCPKeepAliveMaxProbeCount = 10
-	defaultWebsocketEnabled          = 0 // 1 - Enabled, 0 - Disabled
+	enabled  = "enabled"
+	disabled = "disabled"
 )
 
 const (
@@ -190,11 +185,11 @@ func GetAnnotationForceHTTPSEnabled(ingress *networkingv1.Ingress) *bool {
 	}
 
 	if val == enabled {
-		return model.AddressOf(true)
+		return ptr.To(true)
 	}
 
 	if val == disabled {
-		return model.AddressOf(false)
+		return ptr.To(false)
 	}
 
 	boolVal, err := strconv.ParseBool(val)
@@ -203,8 +198,8 @@ func GetAnnotationForceHTTPSEnabled(ingress *networkingv1.Ingress) *bool {
 	}
 
 	if boolVal {
-		return model.AddressOf(true)
+		return ptr.To(true)
 	}
 
-	return model.AddressOf(false)
+	return ptr.To(false)
 }

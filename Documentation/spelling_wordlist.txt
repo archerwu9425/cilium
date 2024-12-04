@@ -100,6 +100,7 @@ Pepelnjak
 Pfaff
 PodCIDR
 Polytechnique
+Portworx
 QCon
 QLogic
 RuleParser
@@ -210,6 +211,7 @@ cassandraparser
 cep
 certgen
 certmanager
+cfg
 cgroup
 cgroups
 chainingTarget
@@ -234,6 +236,7 @@ cnp
 codebase
 codeowner
 codeowners
+commonLabels
 compat
 config
 configMap
@@ -261,6 +264,7 @@ ctf
 customConf
 daemonset
 datacenter
+datagram
 datagrams
 datapath
 datastore
@@ -275,7 +279,9 @@ decapsulated
 decapsulation
 decrypt
 decrypted
+deduplicate
 deepcopy
+defaultLBServiceIPAM
 deletetopic
 demux
 denylist
@@ -293,6 +299,7 @@ dockerhub
 dpaa
 dropdown
 dryRun
+durations
 dwarfris
 eBGP
 eBPF
@@ -303,6 +310,7 @@ effectful
 egressing
 elfutils
 ena
+enableSourceIPVerification
 enablement
 endPort
 endian
@@ -312,9 +320,12 @@ endpointmanager
 enet
 enetc
 etcd
+etcdinit
 eth
 ethernet
 ethtool
+existingSecret
+expirations
 extTrafficPolicy
 extern
 externalIPs
@@ -322,6 +333,7 @@ externalTrafficPolicy
 extraConfig
 facto
 failover
+fcfs
 fec
 filesystem
 filesystems
@@ -374,6 +386,7 @@ hostonlyifs
 hostscope
 hq
 http
+httpbin
 httpd
 https
 hubble
@@ -396,6 +409,7 @@ inlined
 inlines
 inlining
 inodes
+inspectability
 instantiation
 integrations
 internalTrafficPolicy
@@ -432,6 +446,9 @@ jsgt
 jsle
 jslt
 json
+k8sServiceHost
+k8sServiceLookupConfigMapName
+k8sServiceLookupNamespace
 kTLS
 kafka
 kallsyms
@@ -458,6 +475,7 @@ kvstoremesh
 kvstores
 lan
 latencies
+lbipam
 leia
 len
 libbpf
@@ -500,6 +518,8 @@ maglev
 mainboard
 makefile
 mana
+marshallable
+marshalled
 masq
 matchExpressions
 matchLabels
@@ -514,6 +534,7 @@ microservice
 microservices
 minikube
 misconfiguration
+misconfigured
 misconfigures
 mitigations
 mlx
@@ -522,8 +543,10 @@ modularizing
 mountPath
 mov
 mtk
+mtu
 mul
 multicast
+multicluster
 multicore
 multihoming
 musl
@@ -535,6 +558,7 @@ myCA
 mysql
 nameError
 namespace
+namespaceOverride
 namespaced
 namespaces
 nat
@@ -546,6 +570,7 @@ netdevsim
 netfilter
 netfront
 netkit
+netlink
 netns
 netperf
 netsec
@@ -563,6 +588,7 @@ nodeX
 nodegroup
 nodeid
 nodeinit
+nodeipam
 observability
 onData
 onwards
@@ -571,6 +597,7 @@ openapi
 openssl
 originatingTLS
 os
+oseq
 otx
 pahole
 parsable
@@ -631,6 +658,9 @@ rebase
 rebased
 rebasing
 recompiles
+reconcilation
+reconciler
+reconcilers
 reconfigurations
 reconnections
 recv
@@ -642,8 +672,9 @@ reparsing
 repo
 repos
 reproducibility
+reqid
 requireIPv
-requireLBClass
+resizable
 resync
 retpoline
 retransmission
@@ -661,9 +692,11 @@ scalable
 sctl
 seccomp
 secretName
+secretsBackend
 secretsNamespace
 selftest
 selftests
+serverinfo
 serviceAccount
 serviceMonitor
 setrlimit
@@ -721,7 +754,9 @@ tcx
 templating
 terminatingTLS
 terminationGracePeriodSeconds
+testability
 testsuite
+testutils
 tetragon
 th
 thunderx
@@ -734,6 +769,7 @@ toGroups
 tofqdns
 tolerations
 toolchain
+toto
 traceparent
 tracepoint
 tracepoints
@@ -756,6 +792,7 @@ uninline
 unix
 unlabel
 unmanaged
+unmarshalled
 unmigrated
 unselect
 unsettable
@@ -765,6 +802,7 @@ unwinded
 upgradeCompatibility
 uplink
 uprobes
+upstreamed
 uptime
 uretprobes
 url

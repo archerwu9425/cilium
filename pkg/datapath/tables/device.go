@@ -21,8 +21,9 @@ var (
 		FromObject: func(d *Device) index.KeySet {
 			return index.NewKeySet(index.Int(d.Index))
 		},
-		FromKey: index.Int,
-		Unique:  true,
+		FromKey:    index.Int,
+		FromString: index.IntString,
+		Unique:     true,
 	}
 
 	DeviceNameIndex = statedb.Index[*Device, string]{
@@ -30,7 +31,8 @@ var (
 		FromObject: func(d *Device) index.KeySet {
 			return index.NewKeySet(index.String(d.Name))
 		},
-		FromKey: index.String,
+		FromKey:    index.String,
+		FromString: index.FromString,
 	}
 
 	DeviceSelectedIndex = statedb.Index[*Device, bool]{
@@ -38,7 +40,8 @@ var (
 		FromObject: func(d *Device) index.KeySet {
 			return index.NewKeySet(index.Bool(d.Selected))
 		},
-		FromKey: index.Bool,
+		FromKey:    index.Bool,
+		FromString: index.BoolString,
 	}
 )
 
@@ -82,6 +85,8 @@ func (a *HardwareAddr) UnmarshalJSON(bs []byte) error {
 // The devices that are selected are the external facing native devices that
 // Cilium will use with features such as load-balancing, host firewall and routing.
 // For the selection logic applied see 'pkg/datapath/linux/devices_controller.go'.
+//
+// +deepequal-gen=true
 type Device struct {
 	Index        int             // positive integer that starts at one, zero is never used
 	MTU          int             // maximum transmission unit
@@ -142,6 +147,7 @@ func (d *Device) TableRow() []string {
 	}
 }
 
+// NOTE: Update DeepEqual() when changing this struct.
 type DeviceAddress struct {
 	Addr      netip.Addr
 	Secondary bool
@@ -154,6 +160,12 @@ func (d *DeviceAddress) AsIP() net.IP {
 
 func (d *DeviceAddress) String() string {
 	return fmt.Sprintf("%s (secondary=%v, scope=%d)", d.Addr, d.Secondary, d.Scope)
+}
+
+func (d *DeviceAddress) DeepEqual(other *DeviceAddress) bool {
+	return d.Addr == other.Addr &&
+		d.Secondary == other.Secondary &&
+		d.Scope == other.Scope
 }
 
 // SelectedDevices returns the external facing network devices to use for
@@ -173,4 +185,32 @@ func DeviceNames(devs []*Device) (names []string) {
 		names[i] = devs[i].Name
 	}
 	return
+}
+
+// DeviceFilter implements filtering device names either by
+// concrete name ("eth0") or by iptables-like wildcard ("eth+").
+type DeviceFilter []string
+
+// NonEmpty returns true if the filter has been defined
+// (i.e. user has specified --devices).
+func (lst DeviceFilter) NonEmpty() bool {
+	return len(lst) > 0
+}
+
+// Match checks whether the given device name passes the filter
+func (lst DeviceFilter) Match(dev string) bool {
+	if len(lst) == 0 {
+		return true
+	}
+	for _, entry := range lst {
+		if strings.HasSuffix(entry, "+") {
+			prefix := strings.TrimRight(entry, "+")
+			if strings.HasPrefix(dev, prefix) {
+				return true
+			}
+		} else if dev == entry {
+			return true
+		}
+	}
+	return false
 }

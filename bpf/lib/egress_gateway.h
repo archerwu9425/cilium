@@ -17,22 +17,35 @@
 #define EGRESS_STATIC_PREFIX (sizeof(__be32) * 8)
 #define EGRESS_PREFIX_LEN(PREFIX) (EGRESS_STATIC_PREFIX + (PREFIX))
 #define EGRESS_IPV4_PREFIX EGRESS_PREFIX_LEN(32)
+
 /* These are special IP values in the CIDR 0.0.0.0/8 range that map to specific
  * case for in the egress gateway policies handling.
  */
+
+/* Special values in the policy_entry->gateway_ip: */
 #define EGRESS_GATEWAY_NO_GATEWAY (0)
 #define EGRESS_GATEWAY_EXCLUDED_CIDR bpf_htonl(1)
 
+/* Special values in the policy_entry->egress_ip: */
+#define EGRESS_GATEWAY_NO_EGRESS_IP (0)
+
 static __always_inline
 int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, __be32 daddr,
-				      __s8 *ext_err)
+				      __u32 egress_ifindex, __s8 *ext_err)
 {
 	struct bpf_fib_lookup_padded fib_params = {};
 	int oif = 0;
+	int ret;
 
-	*ext_err = (__s8)fib_lookup_v4(ctx, &fib_params, egress_ip, daddr, 0);
+	/* Immediate redirect to egress_ifindex requires L2 resolution.
+	 * Fall back to FIB lookup on older kernels.
+	 */
+	if (egress_ifindex && neigh_resolver_available())
+		return redirect_neigh(egress_ifindex, NULL, 0, 0);
 
-	switch (*ext_err) {
+	ret = (__s8)fib_lookup_v4(ctx, &fib_params, egress_ip, daddr, 0);
+
+	switch (ret) {
 	case BPF_FIB_LKUP_RET_SUCCESS:
 		break;
 	case BPF_FIB_LKUP_RET_NO_NEIGH:
@@ -45,6 +58,7 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 			return CTX_ACT_OK;
 		break;
 	default:
+		*ext_err = (__s8)ret;
 		return DROP_NO_FIB;
 	}
 
@@ -52,7 +66,7 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 	if (is_defined(IS_BPF_HOST) && fib_params.l.ifindex == ctx_get_ifindex(ctx))
 		return CTX_ACT_OK;
 
-	return fib_do_redirect(ctx, true, &fib_params, false, ext_err, &oif);
+	return fib_do_redirect(ctx, true, &fib_params, false, ret, &oif, ext_err);
 }
 
 #ifdef ENABLE_EGRESS_GATEWAY
@@ -107,7 +121,8 @@ egress_gw_request_needs_redirect(struct ipv4_ct_tuple *rtuple __maybe_unused,
 static __always_inline
 bool egress_gw_snat_needed(__be32 saddr __maybe_unused,
 			   __be32 daddr __maybe_unused,
-			   __be32 *snat_addr __maybe_unused)
+			   __be32 *snat_addr __maybe_unused,
+			   __u32 *egress_ifindex __maybe_unused)
 {
 #if defined(ENABLE_EGRESS_GATEWAY)
 	struct egress_gw_policy_entry *egress_gw_policy;
@@ -121,6 +136,10 @@ bool egress_gw_snat_needed(__be32 saddr __maybe_unused,
 		return false;
 
 	*snat_addr = egress_gw_policy->egress_ip;
+#ifdef EGRESS_IFINDEX
+	*egress_ifindex = EGRESS_IFINDEX;
+#endif
+
 	return true;
 #else
 	return false;
@@ -150,7 +169,6 @@ bool egress_gw_reply_matches_policy(struct iphdr *ip4 __maybe_unused)
 
 /** Match a packet against EGW policy map, and return the gateway's IP.
  * @arg rtuple		CT tuple for the packet
- * @arg ct_status	CT result, to identify egressing connections
  * @arg gateway_ip	returns the gateway node's IP
  *
  * Returns
@@ -160,34 +178,14 @@ bool egress_gw_reply_matches_policy(struct iphdr *ip4 __maybe_unused)
  */
 static __always_inline int
 egress_gw_request_needs_redirect_hook(struct ipv4_ct_tuple *rtuple,
-				      enum ct_status ct_status,
 				      __be32 *gateway_ip)
 {
-#if defined(IS_BPF_LXC)
-	/* If the packet is a reply or is related, it means that outside
-	 * has initiated the connection, and so we should skip egress
-	 * gateway, since an egress policy is only matching connections
-	 * originating from a pod.
-	 */
-	if (ct_status == CT_REPLY || ct_status == CT_RELATED)
-		return CTX_ACT_OK;
-#else
-	/* We lookup CT in forward direction at to-netdev and expect to
-	 * get CT_ESTABLISHED for outbound connection as
-	 * from_container should have already created a CT entry.
-	 * If we get CT_NEW here, it's an indication that it's a reply
-	 * for inbound connection or host-level outbound connection.
-	 * We don't expect to receive any other ct_status here.
-	 */
-	if (ct_status != CT_ESTABLISHED)
-		return CTX_ACT_OK;
-#endif
-
 	return egress_gw_request_needs_redirect(rtuple, gateway_ip);
 }
 
 static __always_inline
-bool egress_gw_snat_needed_hook(__be32 saddr, __be32 daddr, __be32 *snat_addr)
+bool egress_gw_snat_needed_hook(__be32 saddr, __be32 daddr, __be32 *snat_addr,
+				__u32 *egress_ifindex)
 {
 	struct remote_endpoint_info *remote_ep;
 
@@ -200,7 +198,7 @@ bool egress_gw_snat_needed_hook(__be32 saddr, __be32 daddr, __be32 *snat_addr)
 	    identity_is_cluster(remote_ep->sec_identity))
 		return false;
 
-	return egress_gw_snat_needed(saddr, daddr, snat_addr);
+	return egress_gw_snat_needed(saddr, daddr, snat_addr, egress_ifindex);
 }
 
 static __always_inline
@@ -226,7 +224,6 @@ bool egress_gw_reply_needs_redirect_hook(struct iphdr *ip4, __u32 *tunnel_endpoi
 static __always_inline
 int egress_gw_handle_packet(struct __ctx_buff *ctx,
 			    struct ipv4_ct_tuple *tuple,
-			    enum ct_status ct_status,
 			    __u32 src_sec_identity, __u32 dst_sec_identity,
 			    const struct trace_ctx *trace)
 {
@@ -242,7 +239,7 @@ int egress_gw_handle_packet(struct __ctx_buff *ctx,
 	if (identity_is_cluster(dst_sec_identity))
 		return CTX_ACT_OK;
 
-	ret = egress_gw_request_needs_redirect_hook(tuple, ct_status, &gateway_ip);
+	ret = egress_gw_request_needs_redirect_hook(tuple, &gateway_ip);
 	if (IS_ERR(ret))
 		return ret;
 

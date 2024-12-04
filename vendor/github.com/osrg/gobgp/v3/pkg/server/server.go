@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"sync"
@@ -879,6 +880,9 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	if state == bgp.BGP_FSM_ESTABLISHED {
 		peer.fsm.lock.RLock()
 		conf.Transport.State.LocalAddress, conf.Transport.State.LocalPort = peer.fsm.LocalHostPort()
+		if conf.Transport.Config.LocalAddress != netip.IPv4Unspecified().String() && conf.Transport.Config.LocalAddress != netip.IPv6Unspecified().String() {
+			conf.Transport.State.LocalAddress = conf.Transport.Config.LocalAddress
+		}
 		_, conf.Transport.State.RemotePort = peer.fsm.RemoteHostPort()
 		buf, _ := peer.fsm.recvOpen.Serialize()
 		// need to copy all values here
@@ -1381,11 +1385,14 @@ func (s *BgpServer) propagateUpdateToNeighbors(rib *table.TableManager, source *
 						knownPathList := destination.GetKnownPathList(targetPeer.TableID(), targetPeer.AS())
 						toAdd := make([]*table.Path, 0, len(knownPathList))
 						for _, p := range knownPathList {
-							// if the path is filtered, there is no need to send the path
+							// If the path is filtered by policies, there is no need to send the path
+							// Otherwise, we send only paths that were previously filtered because of the max path limit
 							p := s.filterpath(targetPeer, p, nil)
 							if p == nil || !targetPeer.isPathSendMaxFiltered(p) {
 								continue
 							}
+							// We unset the flag as the path is not filtered anymore
+							targetPeer.unsetPathSendMaxFiltered(p)
 							toAdd = append(toAdd, p)
 							if len(toAdd) == len(toActuallyDelete) {
 								break
@@ -1613,6 +1620,10 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 			// exclude zone info
 			ipaddr, _ := net.ResolveIPAddr("ip", laddr)
 			peer.fsm.peerInfo.LocalAddress = ipaddr.IP
+			if peer.fsm.pConf.Transport.Config.LocalAddress != netip.IPv4Unspecified().String() && peer.fsm.pConf.Transport.Config.LocalAddress != netip.IPv6Unspecified().String() {
+				peer.fsm.peerInfo.LocalAddress = net.ParseIP(peer.fsm.pConf.Transport.Config.LocalAddress)
+				peer.fsm.pConf.Transport.State.LocalAddress = peer.fsm.pConf.Transport.Config.LocalAddress
+			}
 			neighborAddress := peer.fsm.pConf.State.NeighborAddress
 			peer.fsm.lock.Unlock()
 			deferralExpiredFunc := func(family bgp.RouteFamily) func() {

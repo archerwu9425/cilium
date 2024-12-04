@@ -17,7 +17,7 @@ func TestNilDeepCopy(t *testing.T) {
 
 func TestDeepCopy(t *testing.T) {
 	_, ipnet, err := net.ParseCIDR("1.1.1.1/8")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	c1 := NewCIDR(ipnet)
 	require.NotNil(t, c1)
 
@@ -32,7 +32,7 @@ func TestNewCIDRNil(t *testing.T) {
 func TestIllegalParseCIDR(t *testing.T) {
 	c1, err := ParseCIDR("Illegal")
 	require.Nil(t, c1)
-	require.NotNil(t, err)
+	require.Error(t, err)
 }
 
 func TestIllegalMustParseCIDR(t *testing.T) {
@@ -173,114 +173,5 @@ func TestEqual(t *testing.T) {
 	}
 	for _, tt := range tests {
 		require.Equalf(t, tt.want, tt.fields.n.Equal(tt.args.o), "Test Name: %s", tt.name)
-	}
-}
-
-func mustNewCIDRs(cidrs ...string) []*net.IPNet {
-	ipnets := make([]*net.IPNet, 0, len(cidrs))
-	for _, cidr := range cidrs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			panic(err)
-		}
-		ipnets = append(ipnets, ipNet)
-	}
-	return ipnets
-}
-
-func TestRemoveAll(t *testing.T) {
-	type args struct {
-		ipNets   []*net.IPNet
-		toRemove []*net.IPNet
-	}
-	tests := []struct {
-		name string
-		args args
-		want []*net.IPNet
-	}{
-		{
-			name: "remove head",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: mustNewCIDRs("10.10.0.0/24"),
-			},
-			want: mustNewCIDRs("10.10.1.0/24", "10.10.2.0/24"),
-		},
-		{
-			name: "remove middle",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: mustNewCIDRs("10.10.1.0/24"),
-			},
-			want: mustNewCIDRs("10.10.0.0/24", "10.10.2.0/24"),
-		},
-		{
-			name: "remove tail",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: mustNewCIDRs("10.10.2.0/24"),
-			},
-			want: mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24"),
-		},
-		{
-			name: "remove all",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-			},
-			want: []*net.IPNet{},
-		},
-		{
-			name: "remove none",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: []*net.IPNet{},
-			},
-			want: mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-		},
-		{
-			name: "remove duplicates",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24", "10.10.3.0/24", "10.10.0.0/24"),
-				toRemove: mustNewCIDRs("10.10.0.0/24", "10.10.2.0/24"),
-			},
-			want: mustNewCIDRs("10.10.1.0/24", "10.10.3.0/24"),
-		},
-		{
-			name: "keep duplicates",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24", "10.10.3.0/24", "10.10.0.0/24"),
-				toRemove: mustNewCIDRs("10.10.1.0/24"),
-			},
-			want: mustNewCIDRs("10.10.0.0/24", "10.10.2.0/24", "10.10.3.0/24", "10.10.0.0/24"),
-		},
-		{
-			name: "remove nil",
-			args: args{
-				ipNets:   mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-				toRemove: nil,
-			},
-			want: mustNewCIDRs("10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"),
-		},
-		{
-			name: "remove from empty",
-			args: args{
-				ipNets:   []*net.IPNet{},
-				toRemove: mustNewCIDRs("10.10.1.0/24"),
-			},
-			want: []*net.IPNet{},
-		},
-		{
-			name: "remove from nil",
-			args: args{
-				ipNets:   nil,
-				toRemove: mustNewCIDRs("10.10.1.0/24"),
-			},
-			want: nil,
-		},
-	}
-	for _, tt := range tests {
-		result := RemoveAll(tt.args.ipNets, tt.args.toRemove)
-		require.EqualValuesf(t, tt.want, result, "Test Name: %s", tt.name)
 	}
 }

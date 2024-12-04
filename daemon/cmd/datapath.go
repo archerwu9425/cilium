@@ -5,7 +5,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -15,11 +17,13 @@ import (
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/maps/encrypt"
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/ipmasq"
@@ -29,7 +33,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/neighborsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
-	"github.com/cilium/cilium/pkg/maps/ratelimitmetricsmap"
+	"github.com/cilium/cilium/pkg/maps/ratelimitmap"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/maps/vtep"
 	"github.com/cilium/cilium/pkg/maps/worldcidrsmap"
@@ -41,7 +45,7 @@ import (
 // The filter should take a link and, if found, return the index of that
 // interface, if not found return -1.
 func listFilterIfs(filter func(netlink.Link) int) (map[int]netlink.Link, error) {
-	ifs, err := netlink.LinkList()
+	ifs, err := safenetlink.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +70,6 @@ func clearCiliumVeths() error {
 		}
 		return -1
 	})
-
 	if err != nil {
 		return fmt.Errorf("unable to retrieve host network interfaces: %w", err)
 	}
@@ -152,13 +155,20 @@ func (d *Daemon) initMaps() error {
 		return fmt.Errorf("initializing metrics map: %w", err)
 	}
 
-	if err := ratelimitmetricsmap.RatelimitMetrics.OpenOrCreate(); err != nil {
-		return fmt.Errorf("initializing ratelimit metrics map: %w", err)
+	if err := ratelimitmap.InitMaps(); err != nil {
+		return fmt.Errorf("initializing ratelimit maps: %w", err)
 	}
 
 	if option.Config.TunnelingEnabled() {
 		if err := tunnel.TunnelMap().Recreate(); err != nil {
 			return fmt.Errorf("initializing tunnel map: %w", err)
+		}
+	} else {
+		// Make sure that the tunnel map gets unpinned when running in native
+		// routing mode, to prevent stale leftover entries when changing mode.
+		err := tunnel.TunnelMap().Unpin()
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing tunnel map: %w", err)
 		}
 	}
 
@@ -179,7 +189,7 @@ func (d *Daemon) initMaps() error {
 		log.WithError(err).Fatal("Unable to initialize service maps")
 	}
 
-	if err := policymap.InitCallMaps(option.Config.EnableEnvoyConfig); err != nil {
+	if err := policymap.InitCallMaps(); err != nil {
 		return fmt.Errorf("initializing policy map: %w", err)
 	}
 
@@ -244,6 +254,12 @@ func (d *Daemon) initMaps() error {
 		}
 	}
 
+	if option.Config.EnableIPSec {
+		if err := encrypt.MapCreate(); err != nil {
+			return fmt.Errorf("initializing IPsec map: %w", err)
+		}
+	}
+
 	if !option.Config.RestoreState {
 		// If we are not restoring state, all endpoints can be
 		// deleted. Entries will be re-populated.
@@ -279,10 +295,16 @@ func (d *Daemon) initMaps() error {
 		}
 	}
 
-	if option.Config.NodePortAlg == option.NodePortAlgMaglev {
+	if option.Config.NodePortAlg == option.NodePortAlgMaglev ||
+		option.Config.LoadBalancerAlgorithmAnnotation {
 		if err := lbmap.InitMaglevMaps(option.Config.EnableIPv4, option.Config.EnableIPv6, uint32(option.Config.MaglevTableSize)); err != nil {
 			return fmt.Errorf("initializing maglev maps: %w", err)
 		}
+	}
+
+	_, err := lbmap.NewSkipLBMap()
+	if err != nil {
+		return fmt.Errorf("initializing local redirect policy maps: %w", err)
 	}
 
 	return nil
@@ -323,7 +345,7 @@ func setupRouteToVtepCidr() error {
 		Table: linux_defaults.RouteTableVtep,
 	}
 
-	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, filter, netlink.RT_FILTER_TABLE)
+	routes, err := safenetlink.RouteListFiltered(netlink.FAMILY_V4, filter, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return fmt.Errorf("failed to list routes: %w", err)
 	}
@@ -403,7 +425,21 @@ func setupRouteToVtepCidr() error {
 	return nil
 }
 
-// Datapath returns a reference to the datapath implementation.
-func (d *Daemon) Datapath() datapath.Datapath {
-	return d.datapath
+// Loader returns a reference to the loader implementation.
+func (d *Daemon) Loader() datapath.Loader {
+	return d.loader
+}
+
+// Orchestrator returns a reference to the orchestrator implementation.
+func (d *Daemon) Orchestrator() datapath.Orchestrator {
+	return d.orchestrator
+}
+
+// BandwidthManager returns a reference to the bandwidth manager implementation.
+func (d *Daemon) BandwidthManager() datapath.BandwidthManager {
+	return d.bwManager
+}
+
+func (d *Daemon) IPTablesManager() datapath.IptablesManager {
+	return d.iptablesManager
 }

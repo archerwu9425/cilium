@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -141,9 +142,8 @@ type BackendOperations interface {
 	// client is not connected to the kvstore server. (Only implemented for etcd)
 	Disconnected() <-chan struct{}
 
-	// Status returns the status of the kvstore client including an
-	// eventual error
-	Status() (string, error)
+	// Status returns the status of the kvstore client
+	Status() *models.Status
 
 	// StatusCheckErrors returns a channel which receives status check
 	// errors
@@ -192,13 +192,6 @@ type BackendOperations interface {
 
 	// Close closes the kvstore client
 	Close()
-
-	// Encodes a binary slice into a character set that the backend
-	// supports
-	Encode(in []byte) string
-
-	// Decodes a key previously encoded back into the original binary slice
-	Decode(in string) ([]byte, error)
 
 	// ListAndWatch creates a new watcher which will watch the specified
 	// prefix for changes. Before doing this, it will list the current keys

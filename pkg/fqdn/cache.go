@@ -5,20 +5,20 @@ package fqdn
 
 import (
 	"encoding/json"
-	"net"
+	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"unsafe"
 
-	"golang.org/x/exp/maps"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/fqdn/matchpattern"
 	"github.com/cilium/cilium/pkg/fqdn/re"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/slices"
+	ciliumslices "github.com/cilium/cilium/pkg/slices"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -480,7 +480,7 @@ func (c *DNSCache) lookupIPByTime(now time.Time, ip netip.Addr) (names []string)
 		}
 	}
 
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -594,7 +594,7 @@ func (c *DNSCache) GetIPs() map[netip.Addr][]string {
 	out := make(map[netip.Addr][]string, len(c.reverse))
 
 	for ip, names := range c.reverse {
-		out[ip] = maps.Keys(names)
+		out[ip] = slices.Collect(maps.Keys(names))
 	}
 
 	return out
@@ -827,14 +827,14 @@ func (zombies *DNSZombieMappings) Upsert(expiryTime time.Time, addr netip.Addr, 
 	zombie, updatedExisting := zombies.deletes[addr]
 	if !updatedExisting {
 		zombie = &DNSZombieMapping{
-			Names:           slices.Unique(qname),
+			Names:           ciliumslices.Unique(qname),
 			IP:              addr,
 			DeletePendingAt: expiryTime,
 			revisionAddedAt: zombies.ctGCRevision,
 		}
 		zombies.deletes[addr] = zombie
 	} else {
-		zombie.Names = slices.Unique(append(zombie.Names, qname...))
+		zombie.Names = ciliumslices.Unique(append(zombie.Names, qname...))
 		// Keep the latest expiry time
 		if expiryTime.After(zombie.DeletePendingAt) {
 			zombie.DeletePendingAt = expiryTime
@@ -1097,7 +1097,7 @@ func (zombies *DNSZombieMappings) ForceExpire(expireLookupsBefore time.Time, nam
 	return zombies.forceExpireLocked(expireLookupsBefore, nameMatch, nil)
 }
 
-func (zombies *DNSZombieMappings) forceExpireLocked(expireLookupsBefore time.Time, nameMatch *regexp.Regexp, cidr *net.IPNet) (namesAffected []string) {
+func (zombies *DNSZombieMappings) forceExpireLocked(expireLookupsBefore time.Time, nameMatch *regexp.Regexp, cidr *netip.Prefix) (namesAffected []string) {
 	var toDelete []*DNSZombieMapping
 
 	for _, zombie := range zombies.deletes {
@@ -1108,7 +1108,7 @@ func (zombies *DNSZombieMappings) forceExpireLocked(expireLookupsBefore time.Tim
 		}
 
 		// If cidr is provided, skip zombies with IPs outside the range
-		if cidr != nil && !cidr.Contains(zombie.IP.AsSlice()) {
+		if cidr != nil && !cidr.Contains(zombie.IP) {
 			continue
 		}
 
@@ -1142,7 +1142,7 @@ func (zombies *DNSZombieMappings) forceExpireLocked(expireLookupsBefore time.Tim
 // new DNS lookup.
 // The error return is for errors compiling the internal regexp. This should
 // never happen.
-func (zombies *DNSZombieMappings) ForceExpireByNameIP(expireLookupsBefore time.Time, name string, ips ...net.IP) error {
+func (zombies *DNSZombieMappings) ForceExpireByNameIP(expireLookupsBefore time.Time, name string, ips ...netip.Addr) error {
 	reStr := matchpattern.ToAnchoredRegexp(name)
 	re, err := re.CompileRegex(reStr)
 	if err != nil {
@@ -1152,8 +1152,7 @@ func (zombies *DNSZombieMappings) ForceExpireByNameIP(expireLookupsBefore time.T
 	zombies.Lock()
 	defer zombies.Unlock()
 	for _, ip := range ips {
-		cidr := net.IPNet{Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}
-		cidr.IP = ip.Mask(cidr.Mask)
+		cidr := netip.PrefixFrom(ip, ip.BitLen())
 		zombies.forceExpireLocked(expireLookupsBefore, re, &cidr)
 	}
 	return nil

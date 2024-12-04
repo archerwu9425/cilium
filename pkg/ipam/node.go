@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/tools/cache"
 
+	operatorK8s "github.com/cilium/cilium/operator/k8s"
 	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -190,6 +191,9 @@ type IPStatistics struct {
 	// InterfaceCandidates is the number of attached interfaces with IPs
 	// available for allocation.
 	InterfaceCandidates int
+
+	// AssignedStaticIP is the static IP address assigned to the node (ex: public Elastic IP address in AWS)
+	AssignedStaticIP string
 }
 
 // IsRunning returns true if the node is considered to be running
@@ -287,6 +291,14 @@ func (n *Node) getMaxAllocate() int {
 	return instanceMax
 }
 
+func (n *Node) getStaticIPTags() ipamTypes.Tags {
+	if n.resource.Spec.IPAM.StaticIPTags != nil {
+		return n.resource.Spec.IPAM.StaticIPTags
+	} else {
+		return ipamTypes.Tags{}
+	}
+}
+
 // GetNeededAddresses returns the number of needed addresses that need to be
 // allocated or released. A positive number is returned to indicate allocation.
 // A negative number is returned to indicate release of addresses.
@@ -310,7 +322,7 @@ func getPendingPodCount(nodeName string) (int, error) {
 	if watchers.PodStore == nil {
 		return pendingPods, fmt.Errorf("pod store uninitialized")
 	}
-	values, err := watchers.PodStore.(cache.Indexer).ByIndex(watchers.PodNodeNameIndex, nodeName)
+	values, err := watchers.PodStore.(cache.Indexer).ByIndex(operatorK8s.PodNodeNameIndex, nodeName)
 	if err != nil {
 		return pendingPods, fmt.Errorf("unable to access pod to node name index: %w", err)
 	}
@@ -473,6 +485,9 @@ func (n *Node) recalculate() {
 
 	n.ipv4Alloc.available = a
 	n.stats.IPv4.UsedIPs = len(n.resource.Status.IPAM.Used)
+	if stats.AssignedStaticIP != "" {
+		n.stats.IPv4.AssignedStaticIP = stats.AssignedStaticIP
+	}
 
 	// Get used IP count with prefixes included
 	usedIPForExcessCalc := n.stats.IPv4.UsedIPs
@@ -935,6 +950,16 @@ func (n *Node) maintainIPPool(ctx context.Context) (instanceMutated bool, err er
 		n.removeStaleReleaseIPs()
 	}
 
+	if len(n.getStaticIPTags()) > 0 {
+		if n.stats.IPv4.AssignedStaticIP == "" {
+			ip, err := n.ops.AllocateStaticIP(ctx, n.getStaticIPTags())
+			if err != nil {
+				return false, err
+			}
+			n.stats.IPv4.AssignedStaticIP = ip
+		}
+	}
+
 	a, err := n.determineMaintenanceAction()
 	if err != nil {
 		n.abortNoLongerExcessIPs(nil)
@@ -1029,6 +1054,14 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 	node.Status.IPAM.ReleaseIPs = releaseStatus
 }
 
+func (n *Node) PopulateStaticIPStatus(node *v2.CiliumNode) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	if n.stats.IPv4.AssignedStaticIP != "" {
+		node.Status.IPAM.AssignedStaticIP = n.stats.IPv4.AssignedStaticIP
+	}
+}
+
 // syncToAPIServer synchronizes the contents of the CiliumNode resource
 // [(*Node).resource)] with the K8s apiserver. This operation occurs on an
 // interval to refresh the CiliumNode resource.
@@ -1039,14 +1072,14 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 //
 // To initialize, or seed, the CiliumNode resource, the PreAllocate field is
 // populated with a default value and then is adjusted as necessary.
-func (n *Node) syncToAPIServer() (err error) {
+func (n *Node) syncToAPIServer() error {
 	scopedLog := n.logger()
 	scopedLog.Debug("Refreshing node")
 
 	node := n.ResourceCopy()
 	// n.resource may not have been assigned yet
 	if node == nil {
-		return
+		return nil
 	}
 
 	origNode := node.DeepCopy()
@@ -1070,26 +1103,28 @@ func (n *Node) syncToAPIServer() (err error) {
 	// Two attempts are made in case the local resource is outdated. If the
 	// second attempt fails as well we are likely under heavy contention,
 	// fall back to the controller based background interval to retry.
-	for retry := 0; retry < 2; retry++ {
+	maxRetries := 2
+	for retry := 0; retry < maxRetries; retry++ {
 		if node.Status.IPAM.Used == nil {
 			node.Status.IPAM.Used = ipamTypes.AllocationMap{}
 		}
 
 		n.ops.PopulateStatusFields(node)
 		n.PopulateIPReleaseStatus(node)
+		n.PopulateStaticIPStatus(node)
 
-		err = n.update(origNode, node, retry, true)
+		err := n.update(origNode, node, true)
 		if err == nil {
 			break
+		} else if retry+1 < maxRetries {
+			scopedLog.WithError(err).Info("Failed to update CiliumNode status, will retry")
+		} else {
+			scopedLog.WithError(err).Warning("Unable to update CiliumNode status")
+			return err
 		}
 	}
 
-	if err != nil {
-		scopedLog.WithError(err).Warning("Unable to update CiliumNode status")
-		return err
-	}
-
-	for retry := 0; retry < 2; retry++ {
+	for retry := 0; retry < maxRetries; retry++ {
 		node.Spec.IPAM.Pool = pool
 		scopedLog.WithField("poolSize", len(node.Spec.IPAM.Pool)).Debug("Updating node in apiserver")
 
@@ -1102,17 +1137,20 @@ func (n *Node) syncToAPIServer() (err error) {
 			node.Spec.IPAM.PreAllocate = n.ops.GetMinimumAllocatableIPv4()
 		}
 
-		err = n.update(origNode, node, retry, false)
+		err := n.update(origNode, node, false)
 		if err == nil {
 			break
+		} else if retry+1 < maxRetries {
+			scopedLog.WithError(err).Info("Failed to update CiliumNode spec, will retry")
+		} else {
+			scopedLog.WithError(err).Warning("Unable to update CiliumNode spec")
+			return err
 		}
 	}
 
-	if err != nil {
-		scopedLog.WithError(err).Warning("Unable to update CiliumNode spec")
-	}
+	scopedLog.Debug("Node refreshed")
 
-	return err
+	return nil
 }
 
 // update is a helper function for syncToAPIServer(). This function updates the
@@ -1127,9 +1165,7 @@ func (n *Node) syncToAPIServer() (err error) {
 //   - `origNode` and `node` are updated when we fail to update the resource,
 //     but we succeed in retrieving the latest version of it from the
 //     apiserver.
-func (n *Node) update(origNode, node *v2.CiliumNode, attempts int, status bool) error {
-	scopedLog := n.logger()
-
+func (n *Node) update(origNode, node *v2.CiliumNode, status bool) error {
 	var (
 		updatedNode    *v2.CiliumNode
 		updateErr, err error
@@ -1147,11 +1183,6 @@ func (n *Node) update(origNode, node *v2.CiliumNode, attempts int, status bool) 
 			return nil
 		}
 	} else if updateErr != nil {
-		scopedLog.WithError(updateErr).WithFields(logrus.Fields{
-			logfields.Attempt: attempts,
-			"updateStatus":    status,
-		}).Warning("Failed to update CiliumNode")
-
 		var newNode *v2.CiliumNode
 		newNode, err = n.manager.k8sAPI.Get(node.Name)
 		if err != nil {

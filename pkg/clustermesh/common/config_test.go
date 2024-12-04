@@ -5,14 +5,16 @@ package common
 
 import (
 	"crypto/sha256"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/google/renameio/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/maps"
 
 	"github.com/cilium/cilium/pkg/lock"
 )
@@ -31,7 +33,7 @@ var (
 func writeFile(t *testing.T, name, content string) {
 	t.Helper()
 
-	err := os.WriteFile(name, []byte(content), 0644)
+	err := renameio.WriteFile(name, []byte(content), 0644, renameio.WithTempDir(os.TempDir()))
 	require.NoError(t, err)
 }
 
@@ -131,7 +133,7 @@ func TestWatchConfigDirectory(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		cm.mutex.RLock()
 		defer cm.mutex.RUnlock()
-		assert.ElementsMatch(c, maps.Keys(cm.clusters), []string{"cluster1", "cluster2"})
+		assert.ElementsMatch(c, slices.Collect(maps.Keys(cm.clusters)), []string{"cluster1", "cluster2"})
 	}, timeout, tick)
 
 	require.NoError(t, os.RemoveAll(file1))
@@ -140,7 +142,7 @@ func TestWatchConfigDirectory(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		cm.mutex.RLock()
 		defer cm.mutex.RUnlock()
-		assert.ElementsMatch(c, maps.Keys(cm.clusters), []string{"cluster2"})
+		assert.ElementsMatch(c, slices.Collect(maps.Keys(cm.clusters)), []string{"cluster2"})
 	}, timeout, tick)
 
 	writeFile(t, file3, content1)
@@ -149,7 +151,7 @@ func TestWatchConfigDirectory(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		cm.mutex.RLock()
 		defer cm.mutex.RUnlock()
-		assert.ElementsMatch(c, maps.Keys(cm.clusters), []string{"cluster2", "cluster3"})
+		assert.ElementsMatch(c, slices.Collect(maps.Keys(cm.clusters)), []string{"cluster2", "cluster3"})
 	}, timeout, tick)
 
 	// Test renaming of file from cluster3 to cluster1
@@ -159,7 +161,7 @@ func TestWatchConfigDirectory(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		cm.mutex.RLock()
 		defer cm.mutex.RUnlock()
-		assert.ElementsMatch(c, maps.Keys(cm.clusters), []string{"cluster1", "cluster2"})
+		assert.ElementsMatch(c, slices.Collect(maps.Keys(cm.clusters)), []string{"cluster1", "cluster2"})
 	}, timeout, tick)
 
 	// touch file

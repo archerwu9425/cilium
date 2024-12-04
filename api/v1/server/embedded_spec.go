@@ -860,6 +860,13 @@ func init() {
             "description": "Brief will return a brief representation of the Cilium status.\n",
             "name": "brief",
             "in": "header"
+          },
+          {
+            "type": "boolean",
+            "default": true,
+            "description": "If set to true, failure of the agent to connect to the Kubernetes control plane will cause the agent's health status to also fail.\n",
+            "name": "require-k8s-connectivity",
+            "in": "header"
           }
         ],
         "responses": {
@@ -987,6 +994,9 @@ func init() {
         "parameters": [
           {
             "$ref": "#/parameters/cidr"
+          },
+          {
+            "$ref": "#/parameters/labels"
           }
         ],
         "responses": {
@@ -1220,28 +1230,6 @@ func init() {
           },
           "404": {
             "description": "Map not found"
-          }
-        }
-      }
-    },
-    "/metrics/": {
-      "get": {
-        "tags": [
-          "metrics"
-        ],
-        "summary": "Retrieve cilium metrics",
-        "responses": {
-          "200": {
-            "description": "Success",
-            "schema": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/Metric"
-              }
-            }
-          },
-          "500": {
-            "description": "Metrics cannot be retrieved"
           }
         }
       }
@@ -1909,6 +1897,10 @@ func init() {
           "description": "Indicator if this backend is preferred in the context of clustermesh service affinity. The value is set based\non related annotation of global service. Applicable for active state only.",
           "type": "boolean"
         },
+        "protocol": {
+          "description": "Layer 4 protocol (TCP, UDP, etc)",
+          "type": "string"
+        },
         "state": {
           "description": "State of the backend for load-balancing service traffic",
           "type": "string",
@@ -2209,6 +2201,13 @@ func init() {
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "match-families": {
+          "description": "Matches any of the provided address families. If empty matches all address families.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpFamily"
           }
         },
         "match-neighbors": {
@@ -2883,6 +2882,10 @@ func init() {
         "netns-cookie": {
           "description": "Network namespace cookie",
           "type": "string"
+        },
+        "parent-interface-index": {
+          "description": "Index of network device from which an IP was used as endpoint IP. Only relevant for ENI environments.",
+          "type": "integer"
         },
         "pid": {
           "description": "Process ID of the workload belonging to this endpoint",
@@ -4669,6 +4672,10 @@ func init() {
           "description": "Number of nodes in the cluster",
           "type": "integer"
         },
+        "num-service-exports": {
+          "description": "Number of MCS-API service exports in the cluster",
+          "type": "integer"
+        },
         "num-shared-services": {
           "description": "Number of services in the cluster",
           "type": "integer"
@@ -4706,6 +4713,11 @@ func init() {
           "description": "Whether the configuration has been correctly retrieved",
           "type": "boolean"
         },
+        "service-exports-enabled": {
+          "description": "Whether or not MCS-API ServiceExports is enabled by the cluster (null means unsupported).",
+          "type": "boolean",
+          "x-nullable": true
+        },
         "sync-canaries": {
           "description": "Whether the remote cluster supports per-prefix \"synced\" canaries",
           "type": "boolean"
@@ -4726,6 +4738,11 @@ func init() {
         "nodes": {
           "description": "Nodes synchronization status",
           "type": "boolean"
+        },
+        "service-exports": {
+          "description": "MCS-API service exports synchronization status (null means that the component is not watching service exports)",
+          "type": "boolean",
+          "x-nullable": true
         },
         "services": {
           "description": "Services synchronization status",
@@ -6423,6 +6440,13 @@ func init() {
             "description": "Brief will return a brief representation of the Cilium status.\n",
             "name": "brief",
             "in": "header"
+          },
+          {
+            "type": "boolean",
+            "default": true,
+            "description": "If set to true, failure of the agent to connect to the Kubernetes control plane will cause the agent's health status to also fail.\n",
+            "name": "require-k8s-connectivity",
+            "in": "header"
           }
         ],
         "responses": {
@@ -6562,6 +6586,14 @@ func init() {
             "description": "A CIDR range of IPs",
             "name": "cidr",
             "in": "query"
+          },
+          {
+            "description": "List of labels\n",
+            "name": "labels",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/Labels"
+            }
           }
         ],
         "responses": {
@@ -6832,28 +6864,6 @@ func init() {
           },
           "404": {
             "description": "Map not found"
-          }
-        }
-      }
-    },
-    "/metrics/": {
-      "get": {
-        "tags": [
-          "metrics"
-        ],
-        "summary": "Retrieve cilium metrics",
-        "responses": {
-          "200": {
-            "description": "Success",
-            "schema": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/Metric"
-              }
-            }
-          },
-          "500": {
-            "description": "Metrics cannot be retrieved"
           }
         }
       }
@@ -7584,6 +7594,10 @@ func init() {
           "description": "Indicator if this backend is preferred in the context of clustermesh service affinity. The value is set based\non related annotation of global service. Applicable for active state only.",
           "type": "boolean"
         },
+        "protocol": {
+          "description": "Layer 4 protocol (TCP, UDP, etc)",
+          "type": "string"
+        },
         "state": {
           "description": "State of the backend for load-balancing service traffic",
           "type": "string",
@@ -7884,6 +7898,13 @@ func init() {
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "match-families": {
+          "description": "Matches any of the provided address families. If empty matches all address families.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BgpFamily"
           }
         },
         "match-neighbors": {
@@ -8633,6 +8654,10 @@ func init() {
         "netns-cookie": {
           "description": "Network namespace cookie",
           "type": "string"
+        },
+        "parent-interface-index": {
+          "description": "Index of network device from which an IP was used as endpoint IP. Only relevant for ENI environments.",
+          "type": "integer"
         },
         "pid": {
           "description": "Process ID of the workload belonging to this endpoint",
@@ -10813,6 +10838,10 @@ func init() {
           "description": "Number of nodes in the cluster",
           "type": "integer"
         },
+        "num-service-exports": {
+          "description": "Number of MCS-API service exports in the cluster",
+          "type": "integer"
+        },
         "num-shared-services": {
           "description": "Number of services in the cluster",
           "type": "integer"
@@ -10850,6 +10879,11 @@ func init() {
           "description": "Whether the configuration has been correctly retrieved",
           "type": "boolean"
         },
+        "service-exports-enabled": {
+          "description": "Whether or not MCS-API ServiceExports is enabled by the cluster (null means unsupported).",
+          "type": "boolean",
+          "x-nullable": true
+        },
         "sync-canaries": {
           "description": "Whether the remote cluster supports per-prefix \"synced\" canaries",
           "type": "boolean"
@@ -10870,6 +10904,11 @@ func init() {
         "nodes": {
           "description": "Nodes synchronization status",
           "type": "boolean"
+        },
+        "service-exports": {
+          "description": "MCS-API service exports synchronization status (null means that the component is not watching service exports)",
+          "type": "boolean",
+          "x-nullable": true
         },
         "services": {
           "description": "Services synchronization status",

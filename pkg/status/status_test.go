@@ -30,6 +30,7 @@ func setUpTest(_ testing.TB) *StatusTestSuite {
 		Interval:         10 * time.Millisecond,
 		WarningThreshold: 20 * time.Millisecond,
 		FailureThreshold: 80 * time.Millisecond,
+		StackdumpPath:    "",
 	}
 	s.mutex.Unlock()
 
@@ -152,7 +153,7 @@ func TestCollectorSuccess(t *testing.T) {
 	require.NoError(t, testutils.WaitUntil(func() bool {
 		return ok.Load() >= 3 && errs.Load() >= 3
 	}, 1*time.Second))
-	require.Len(t, collector.GetStaleProbes(), 0)
+	require.Empty(t, collector.GetStaleProbes())
 }
 
 func TestCollectorSuccessAfterTimeout(t *testing.T) {
@@ -186,5 +187,38 @@ func TestCollectorSuccessAfterTimeout(t *testing.T) {
 	require.NoError(t, testutils.WaitUntil(func() bool {
 		return timeout.Load() == 1 && ok.Load() > 0
 	}, 1*time.Second))
-	require.Len(t, collector.GetStaleProbes(), 0)
+	require.Empty(t, collector.GetStaleProbes())
+}
+
+func TestWaitForFirstRun(t *testing.T) {
+	s := setUpTest(t)
+
+	unlock := make(chan struct{})
+	probeFn := func(ctx context.Context) (interface{}, error) {
+		<-unlock
+		return nil, nil
+	}
+
+	p := []Probe{
+		{Probe: probeFn, OnStatusUpdate: func(status Status) {}},
+		{Probe: probeFn, OnStatusUpdate: func(status Status) {}},
+		{Probe: probeFn, OnStatusUpdate: func(status Status) {}},
+	}
+
+	collector := NewCollector(p, s.Config())
+	defer collector.Close()
+
+	test := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		return collector.WaitForFirstRun(ctx)
+	}
+
+	require.Error(t, test())
+	unlock <- struct{}{}
+	require.Error(t, test())
+	unlock <- struct{}{}
+	require.Error(t, test())
+	unlock <- struct{}{}
+	require.NoError(t, test())
 }

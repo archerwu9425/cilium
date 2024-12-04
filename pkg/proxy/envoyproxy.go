@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/completion"
-	"github.com/cilium/cilium/pkg/datapath/iptables"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy/endpoint"
@@ -28,7 +28,7 @@ type envoyRedirect struct {
 type envoyProxyIntegration struct {
 	adminClient     *envoy.EnvoyAdminClient
 	xdsServer       envoy.XDSServer
-	iptablesManager *iptables.Manager
+	iptablesManager datapath.IptablesManager
 }
 
 // createRedirect creates a redirect with corresponding proxy configuration. This will launch a proxy instance.
@@ -64,8 +64,12 @@ func (p *envoyProxyIntegration) handleEnvoyRedirect(r *Redirect, wg *completion.
 	return redirect, nil
 }
 
-func (p *envoyProxyIntegration) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, vis *policy.VisibilityPolicy, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
-	return p.xdsServer.UpdateNetworkPolicy(ep, vis, policy, ingressPolicyEnforced, egressPolicyEnforced, wg)
+func (p *envoyProxyIntegration) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, policy *policy.L4Policy, ingressPolicyEnforced, egressPolicyEnforced bool, wg *completion.WaitGroup) (error, func() error) {
+	return p.xdsServer.UpdateNetworkPolicy(ep, policy, ingressPolicyEnforced, egressPolicyEnforced, wg)
+}
+
+func (p *envoyProxyIntegration) UseCurrentNetworkPolicy(ep endpoint.EndpointUpdater, policy *policy.L4Policy, wg *completion.WaitGroup) {
+	p.xdsServer.UseCurrentNetworkPolicy(ep, policy, wg)
 }
 
 func (p *envoyProxyIntegration) RemoveNetworkPolicy(ep endpoint.EndpointInfoSource) {
@@ -78,13 +82,6 @@ func (k *envoyRedirect) UpdateRules(wg *completion.WaitGroup) (revert.RevertFunc
 }
 
 // Close the redirect.
-func (r *envoyRedirect) Close(wg *completion.WaitGroup) (revert.FinalizeFunc, revert.RevertFunc) {
-	revertFunc := r.xdsServer.RemoveListener(r.listenerName, wg)
-
-	return nil, func() error {
-		// Don't wait for an ACK for the reverted xDS updates.
-		// This is best-effort.
-		revertFunc(completion.NewCompletion(nil, nil))
-		return nil
-	}
+func (r *envoyRedirect) Close() {
+	r.xdsServer.RemoveListener(r.listenerName, nil)
 }

@@ -10,10 +10,8 @@ import (
 	"maps"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"sync"
-	"sync/atomic"
 
 	"github.com/cilium/statedb"
 	"github.com/sirupsen/logrus"
@@ -25,15 +23,14 @@ import (
 	"github.com/cilium/cilium/daemon/cmd/cni"
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/auth"
-	"github.com/cilium/cilium/pkg/cgroups/manager"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/datapath/link"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
@@ -44,8 +41,9 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/fqdn"
-	"github.com/cilium/cilium/pkg/hubble/observer"
+	hubblecell "github.com/cilium/cilium/pkg/hubble/cell"
 	"github.com/cilium/cilium/pkg/identity"
+	identitycell "github.com/cilium/cilium/pkg/identity/cache/cell"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/ipam"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
@@ -73,12 +71,13 @@ import (
 	policyAPI "github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/proxy"
 	"github.com/cilium/cilium/pkg/rate"
-	"github.com/cilium/cilium/pkg/recorder"
+	"github.com/cilium/cilium/pkg/redirectpolicy"
 	"github.com/cilium/cilium/pkg/resiliency"
 	"github.com/cilium/cilium/pkg/service"
 	serviceStore "github.com/cilium/cilium/pkg/service/store"
 	"github.com/cilium/cilium/pkg/status"
 	"github.com/cilium/cilium/pkg/time"
+	wireguard "github.com/cilium/cilium/pkg/wireguard/agent"
 )
 
 const (
@@ -96,8 +95,8 @@ type Daemon struct {
 	l7Proxy          *proxy.Proxy
 	envoyXdsServer   envoy.XDSServer
 	svc              service.ServiceManager
-	rec              *recorder.Recorder
-	policy           *policy.Repository
+	policy           policy.PolicyRepository
+	idmgr            identitymanager.IDManager
 
 	statusCollectMutex lock.RWMutex
 	statusResponse     models.StatusResponse
@@ -106,8 +105,9 @@ type Daemon struct {
 	monitorAgent monitoragent.Agent
 	ciliumHealth *health.CiliumHealth
 
-	devices   statedb.Table[*datapathTables.Device]
-	nodeAddrs statedb.Table[datapathTables.NodeAddress]
+	directRoutingDev datapathTables.DirectRoutingDevice
+	devices          statedb.Table[*datapathTables.Device]
+	nodeAddrs        statedb.Table[datapathTables.NodeAddress]
 
 	// dnsNameManager tracks which api.FQDNSelector are present in policy which
 	// apply to locally running endpoints.
@@ -122,9 +122,9 @@ type Daemon struct {
 
 	mtuConfig mtu.MTU
 
-	// datapath is the underlying datapath implementation to use to
-	// implement all aspects of an agent
-	datapath datapath.Datapath
+	loader datapath.Loader
+
+	nodeAddressing datapath.NodeAddressing
 
 	// nodeDiscovery defines the node discovery logic of the agent
 	nodeDiscovery  *nodediscovery.NodeDiscovery
@@ -137,7 +137,7 @@ type Daemon struct {
 
 	endpointRestoreComplete chan struct{}
 
-	identityAllocator CachingIdentityAllocator
+	identityAllocator identitycell.CachingIdentityAllocator
 
 	ipcache *ipcache.IPCache
 
@@ -151,14 +151,9 @@ type Daemon struct {
 	// endpoint's routing in ENI or Azure IPAM mode
 	healthEndpointRouting *linuxrouting.RoutingInfo
 
-	linkCache      *link.LinkCache
-	hubbleObserver atomic.Pointer[observer.LocalObserverServer]
-
 	// endpointCreations is a map of all currently ongoing endpoint
 	// creation events
 	endpointCreations *endpointCreationManager
-
-	cgroupManager manager.CGroupManager
 
 	apiLimiterSet *rate.APILimiterSet
 
@@ -183,10 +178,19 @@ type Daemon struct {
 	// Tunnel-related configuration
 	tunnelConfig tunnel.Config
 	bwManager    datapath.BandwidthManager
+
+	wireguardAgent  *wireguard.Agent
+	orchestrator    datapath.Orchestrator
+	iptablesManager datapath.IptablesManager
+	hubble          hubblecell.HubbleIntegration
+
+	lrpManager *redirectpolicy.Manager
+
+	ctMapGC ctmap.GCRunner
 }
 
 // GetPolicyRepository returns the policy repository of the daemon
-func (d *Daemon) GetPolicyRepository() *policy.Repository {
+func (d *Daemon) GetPolicyRepository() policy.PolicyRepository {
 	return d.policy
 }
 
@@ -197,27 +201,13 @@ func (d *Daemon) GetCompilationLock() datapath.CompilationLock {
 }
 
 func (d *Daemon) init() error {
-	globalsDir := option.Config.GetGlobalsDir()
-	if err := os.MkdirAll(globalsDir, defaults.RuntimePathRights); err != nil {
-		log.WithError(err).WithField(logfields.Path, globalsDir).Fatal("Could not create runtime directory")
-	}
-
-	if err := os.Chdir(option.Config.StateDir); err != nil {
-		log.WithError(err).WithField(logfields.Path, option.Config.StateDir).Fatal("Could not change to runtime directory")
-	}
-
 	if !option.Config.DryMode {
-		if err := d.Datapath().Orchestrator().Reinitialize(d.ctx); err != nil {
-			return fmt.Errorf("failed while reinitializing datapath: %w", err)
-		}
-
 		if option.Config.EnableL7Proxy {
 			if err := linuxdatapath.NodeEnsureLocalRoutingRule(); err != nil {
 				return fmt.Errorf("ensuring local routing rule: %w", err)
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -225,7 +215,7 @@ func (d *Daemon) init() error {
 // `cilium_host` interface is the given restored IP. If the given IP is nil,
 // then it attempts to clear all IPs from the interface.
 func removeOldRouterState(ipv6 bool, restoredIP net.IP) error {
-	l, err := netlink.LinkByName(defaults.HostDevice)
+	l, err := safenetlink.LinkByName(defaults.HostDevice)
 	if errors.As(err, &netlink.LinkNotFoundError{}) {
 		// There's no old state remove as the host device doesn't exist.
 		// This is always the case when the agent is started for the first time.
@@ -239,7 +229,7 @@ func removeOldRouterState(ipv6 bool, restoredIP net.IP) error {
 	if ipv6 {
 		family = netlink.FAMILY_V6
 	}
-	addrs, err := netlink.AddrList(l, family)
+	addrs, err := safenetlink.AddrList(l, family)
 	if err != nil {
 		return resiliency.Retryable(err)
 	}
@@ -277,7 +267,7 @@ func removeOldCiliumHostIPs(ctx context.Context, restoredRouterIPv4, restoredRou
 		if option.Config.EnableIPv6 {
 			errs = errors.Join(errs, removeOldRouterState(true, restoredRouterIPv6))
 		}
-		if resiliency.IsRetryable(errs) {
+		if resiliency.IsRetryable(errs) && !errors.As(errs, &netlink.LinkNotFoundError{}) {
 			log.WithField(logfields.Attempt, retries).WithError(errs).Warnf("Failed to remove old router IPs from cilium_host.")
 			return false, nil
 		}
@@ -293,13 +283,6 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	var err error
 
 	bootstrapStats.daemonInit.Start()
-
-	// Validate configuration options that depend on other cells.
-	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD &&
-		!option.Config.LoadBalancerExternalControlPlane &&
-		!params.Clientset.IsEnabled() {
-		return nil, nil, fmt.Errorf("CRD Identity allocation mode requires k8s to be configured")
-	}
 
 	// EncryptedOverlay feature must check the TunnelProtocol if enabled, since
 	// it only supports VXLAN right now.
@@ -367,8 +350,6 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	}
 	lbmap.Init(lbmapInitParams)
 
-	params.NodeManager.Subscribe(params.Datapath.Node())
-
 	identity.IterateReservedIdentities(func(_ identity.NumericIdentity, _ *identity.Identity) {
 		metrics.Identity.WithLabelValues(identity.ReservedIdentityType).Inc()
 		metrics.IdentityLabelSources.WithLabelValues(labels.LabelSourceReserved).Inc()
@@ -381,7 +362,9 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		buildEndpointSem:  semaphore.NewWeighted(int64(numWorkerThreads())),
 		compilationLock:   params.CompilationLock,
 		mtuConfig:         params.MTU,
-		datapath:          params.Datapath,
+		directRoutingDev:  params.DirectRoutingDevice,
+		loader:            params.Loader,
+		nodeAddressing:    params.NodeAddressing,
 		devices:           params.Devices,
 		nodeAddrs:         params.NodeAddrs,
 		nodeDiscovery:     params.NodeDiscovery,
@@ -395,6 +378,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		identityAllocator: params.IdentityAllocator,
 		ipcache:           params.IPCache,
 		policy:            params.Policy,
+		idmgr:             params.IdentityManager,
 		cniConfigManager:  params.CNIConfigManager,
 		clusterInfo:       params.ClusterInfo,
 		clustermesh:       params.ClusterMesh,
@@ -407,12 +391,23 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		bigTCPConfig:      params.BigTCPConfig,
 		tunnelConfig:      params.TunnelConfig,
 		bwManager:         params.BandwidthManager,
-		cgroupManager:     params.CGroupManager,
 		endpointManager:   params.EndpointManager,
 		k8sWatcher:        params.K8sWatcher,
 		k8sSvcCache:       params.K8sSvcCache,
-		rec:               params.Recorder,
 		ipam:              params.IPAM,
+		wireguardAgent:    params.WGAgent,
+		orchestrator:      params.Orchestrator,
+		iptablesManager:   params.IPTablesManager,
+		hubble:            params.Hubble,
+		lrpManager:        params.LRPManager,
+		ctMapGC:           params.CTNATMapGC,
+	}
+
+	// initialize endpointRestoreComplete channel as soon as possible so that subsystems
+	// can wait on it to get closed and not block forever if they happen so start
+	// waiting when it is not yet initialized (which causes them to block forever).
+	if option.Config.RestoreState {
+		d.endpointRestoreComplete = make(chan struct{})
 	}
 
 	// Collect CIDR identities from the "old" bpf ipcache and restore them
@@ -553,12 +548,6 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	if err != nil {
 		log.WithError(err).Error("Unable to read existing endpoints")
 	}
-	// Restore all proxy ports from datapath, if possible
-	// Must be run before d.bootstrapFQDN(), which depends
-	// on the ports having been restored.
-	if d.l7Proxy != nil {
-		d.l7Proxy.RestoreProxyPorts()
-	}
 	bootstrapStats.restore.End(true)
 
 	bootstrapStats.fqdn.Start()
@@ -613,7 +602,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	}
 
 	if params.WGAgent != nil && option.Config.EnableWireguard {
-		if err := params.WGAgent.Init(d.ipcache, d.mtuConfig); err != nil {
+		if err := params.WGAgent.Init(d.ipcache); err != nil {
 			log.WithError(err).Error("failed to initialize WireGuard agent")
 			return nil, nil, fmt.Errorf("failed to initialize WireGuard agent: %w", err)
 		}
@@ -626,26 +615,31 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	// This is because the device detection requires self (Cilium)Node object,
 	// and the k8s service watcher depends on option.Config.EnableNodePort flag
 	// which can be modified after the device detection.
-	var devices []string
-	if params.DeviceManager != nil {
-		if devices, err = params.DeviceManager.Detect(params.Clientset.IsEnabled()); err != nil {
-			if option.Config.AreDevicesRequired() {
-				// Fail hard if devices are required to function.
-				return nil, nil, fmt.Errorf("failed to detect devices: %w", err)
-			}
-			log.WithError(err).Warn("failed to detect devices, disabling BPF NodePort")
-			disableNodePort()
+
+	rxn := d.db.ReadTxn()
+	drdName := ""
+	directRoutingDevice, _ := params.DirectRoutingDevice.Get(ctx, rxn)
+	if directRoutingDevice == nil {
+		if option.Config.AreDevicesRequired() {
+			// Fail hard if devices are required to function.
+			return nil, nil, fmt.Errorf("unable to determine direct routing device. Use --%s to specify it",
+				option.DirectRoutingDevice)
 		}
+
+		log.WithError(err).Warn("failed to detect devices, disabling BPF NodePort")
+		disableNodePort()
+	} else {
+		drdName = directRoutingDevice.Name
+		log.WithField(option.DirectRoutingDevice, drdName).Info("Direct routing device detected")
 	}
 
-	nativeDevices, _ := datapathTables.SelectedDevices(d.devices, d.db.ReadTxn())
-	if err := finishKubeProxyReplacementInit(params.Sysctl, nativeDevices); err != nil {
+	nativeDevices, _ := datapathTables.SelectedDevices(d.devices, rxn)
+	if err := finishKubeProxyReplacementInit(params.Sysctl, nativeDevices, drdName); err != nil {
 		log.WithError(err).Error("failed to finalise LB initialization")
 		return nil, nil, fmt.Errorf("failed to finalise LB initialization: %w", err)
 	}
 
-	// BPF masquerade depends on BPF NodePort and require socket-LB to
-	// be enabled in the tunneling mode, so the following checks should
+	// BPF masquerade depends on BPF NodePort, so the following checks should
 	// happen after invoking initKubeProxyReplacementOptions().
 	if option.Config.MasqueradingEnabled() && option.Config.EnableBPFMasquerade {
 
@@ -657,17 +651,11 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		case len(option.Config.MasqueradeInterfaces) > 0:
 			err = fmt.Errorf("BPF masquerade does not allow to specify devices via --%s (use --%s instead)",
 				option.MasqueradeInterfaces, option.Devices)
-		case option.Config.TunnelingEnabled() && !option.Config.EnableSocketLB:
-			err = fmt.Errorf("BPF masquerade requires socket-LB (--%s=\"false\")",
-				option.EnableSocketLB)
 		}
 		if err != nil {
 			log.WithError(err).Error("unable to initialize BPF masquerade support")
 			return nil, nil, fmt.Errorf("unable to initialize BPF masquerade support: %w", err)
 		}
-	}
-
-	if option.Config.MasqueradingEnabled() && option.Config.EnableBPFMasquerade {
 		if option.Config.EnableMasqueradeRouteSource {
 			log.Error("BPF masquerading does not yet support masquerading to source IP from routing layer")
 			return nil, nil, fmt.Errorf("BPF masquerading to route source (--%s=\"true\") currently not supported with BPF-based masquerading (--%s=\"true\")", option.EnableMasqueradeRouteSource, option.EnableBPFMasquerade)
@@ -679,7 +667,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		log.Error("IPv4 and IPv6 masquerading are both disabled, BPF masquerading requires at least one to be enabled")
 		return nil, nil, fmt.Errorf("BPF masquerade requires (--%s=\"true\" or --%s=\"true\")", option.EnableIPv4Masquerade, option.EnableIPv6Masquerade)
 	}
-	if len(devices) == 0 {
+	if len(nativeDevices) == 0 {
 		if option.Config.EnableHostFirewall {
 			msg := "Host firewall's external facing device could not be determined. Use --%s to specify."
 			log.WithError(err).Errorf(msg, option.Devices)
@@ -836,7 +824,8 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	// well known identities have already been initialized above.
 	// Ignore the channel returned by this function, as we want the global
 	// identity allocator to run asynchronously.
-	if !option.Config.LoadBalancerExternalControlPlane {
+	if option.Config.IdentityAllocationMode != option.IdentityAllocationModeCRD ||
+		params.Clientset.IsEnabled() {
 		realIdentityAllocator := d.identityAllocator
 		realIdentityAllocator.InitIdentityAllocator(params.Clientset)
 	}
@@ -882,7 +871,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 	// we populate the IPCache with the host's IP(s).
 	d.ipcache.InitIPIdentityWatcher(d.ctx, params.StoreFactory)
 
-	if err := params.IPsecKeyCustodian.StartBackgroundJobs(d.Datapath().Node()); err != nil {
+	if err := params.IPsecKeyCustodian.StartBackgroundJobs(params.NodeHandler); err != nil {
 		log.WithError(err).Error("Unable to start IPsec key watcher")
 	}
 
@@ -891,32 +880,10 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 
 // Close shuts down a daemon
 func (d *Daemon) Close() {
-	identitymanager.RemoveAll()
+	d.idmgr.RemoveAll()
 
 	// Ensures all controllers are stopped!
 	d.controllers.RemoveAllAndWait()
-}
-
-// TriggerReload causes all BPF programs and maps to be reloaded. It first attempts
-// to recompile the base programs, and if this fails returns an error. If base
-// program load is successful, it subsequently triggers regeneration of all
-// endpoints and returns a waitgroup that may be used by the caller to wait for
-// all endpoint regeneration to complete.
-//
-// If an error is returned, then no regeneration was successful. If no error
-// is returned, then the base programs were successfully regenerated, but
-// endpoints may or may not have successfully regenerated.
-func (d *Daemon) TriggerReload(reason string) (*sync.WaitGroup, error) {
-	log.Debugf("BPF reload triggered from %s", reason)
-	if err := d.Datapath().Orchestrator().Reinitialize(d.ctx); err != nil {
-		return nil, fmt.Errorf("unable to recompile base programs from %s: %w", reason, err)
-	}
-
-	regenRequest := &regeneration.ExternalRegenerationMetadata{
-		Reason:            reason,
-		RegenerationLevel: regeneration.RegenerateWithDatapath,
-	}
-	return d.endpointManager.RegenerateAllEndpoints(regenRequest), nil
 }
 
 // numWorkerThreads returns the number of worker threads with a minimum of 2.

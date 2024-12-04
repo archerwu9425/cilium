@@ -49,9 +49,11 @@ following command:
 
 .. attention::
 
-    The ``+`` sign in the secret is mandatory since v1.16. It will force the
-    use of per-tunnel IPsec keys. The former global IPsec keys are considered
-    insecure (cf. `GHSA-pwqm-x5x6-5586`_).
+    The ``+`` sign in the secret is strongly recommended. It will force the use
+    of per-tunnel IPsec keys. The former global IPsec keys are considered
+    insecure (cf. `GHSA-pwqm-x5x6-5586`_) and were deprecated in v1.16. When
+    using ``+``, the per-tunnel keys will be derived from the secret you
+    generated.
 
 .. _GHSA-pwqm-x5x6-5586: https://github.com/cilium/cilium/security/advisories/GHSA-pwqm-x5x6-5586
 
@@ -207,6 +209,34 @@ to all clusters in the mesh. You might need to increase the transition time to
 allow for the new keys to be deployed and applied across all clusters,
 which you can do with the agent flag ``ipsec-key-rotation-duration``.
 
+Monitoring
+==========
+
+When monitoring network traffic on a node with IPSec enabled, it is normal to observe
+in the same interface both the outer packet (node-to-node) carrying the ESP-encrypted
+payload and then the decrypted inner packet (pod-to-pod). This occurs as, once a packet
+is decrypted, it is recirculated back to the same interface for further processing.
+Therefore, depending on the ``tcpdump`` filter applied, the capture might differ, but this
+**does not** indicate that encryption is not functioning correctly. In particular, to observe:
+    
+1. Only the encrypted packet: use the filter ``esp``.
+2. Only the decrypted packet: use a specific filter for the protocol used by the pods (such as ``icmp`` for ping).
+3. Both encrypted and decrypted packets: use no filter or combine the filters for both (such as ``esp or icmp``).
+
+The following capture was taken on a Kind cluster with no filter applied (replace ``eth0``
+with ``cilium_vxlan`` if tunneling is enabled). The nodes have IP addresses ``10.244.2.92``
+and ``10.244.1.148``, while the pods have IP addresses ``10.244.2.189`` and ``10.244.1.7``,
+using ping (ICMP) for communication.
+
+.. code-block:: shell-session
+
+  tcpdump -l -n -i eth0
+  tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+  listening on cilium_vxlan, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+  09:22:16.379908 IP 10.244.2.92 > 10.244.1.148: ESP(spi=0x00000003,seq=0x8), length 120
+  09:22:16.379908 IP 10.244.2.189 > 10.244.1.7: ICMP echo request, id 33, seq 1, length 64
+
+
 Troubleshooting
 ===============
 
@@ -266,10 +296,13 @@ errors.
    Cluster Mesh where several clusters need to be updated), you can increase the
    delay before cleanup with agent flag ``ipsec-key-rotation-duration``.
 
- * ``XfrmInStateProtoError`` errors can happen if the key is updated without
-   incrementing the SPI (also called ``KEYID`` in :ref:`ipsec_key_rotation`
-   instructions above). It can be fixed by performing a new key rotation,
-   properly.
+ * ``XfrmInStateProtoError`` errors can happen for the following reasons:
+   1. If the key is updated without incrementing the SPI (also called ``KEYID``
+   in :ref:`ipsec_key_rotation` instructions above). It can be fixed by
+   performing a new key rotation, properly.
+   2. If the source node encrypts the packets using a different anti-replay seq
+   from the anti-reply oseq on the destination node. This can be fixed by
+   properly performing a new key rotation.
 
  * ``XfrmFwdHdrError`` and ``XfrmInError`` happen when the kernel fails to
    lookup the route for a packet it decrypted. This can legitimately happen
@@ -293,7 +326,8 @@ errors.
                             packet for a pod that was deleted or (2) failed to
                             allocate memory.
    XfrmInNoStates           Bug in the XFRM configuration for decryption.
-   XfrmInStateProtoError    There is a key mismatch between nodes.
+   XfrmInStateProtoError    There is a key or anti-replay seq mismatch between
+                            nodes.
    XfrmInStateInvalid       A received packet matched an XFRM state that is
                             being deleted.
    XfrmInTmplMismatch       Bug in the XFRM configuration for decryption.
@@ -331,9 +365,7 @@ Limitations
     * Transparent encryption is not currently supported when chaining Cilium on
       top of other CNI plugins. For more information, see :gh-issue:`15596`.
     * :ref:`HostPolicies` are not currently supported with IPsec encryption.
-    * IPsec encryption does not work when using :ref:`kube-proxy replacement
-      <kubeproxy-free>`. Be aware that other features may require a kube-proxy
-      free environment in which case they are mutual exclusive.
+    * IPsec encryption currently does not work with BPF Host Routing.
     * IPsec encryption is not currently supported in combination with IPv6-only clusters.
     * IPsec encryption is not supported on clusters or clustermeshes with more
       than 65535 nodes.

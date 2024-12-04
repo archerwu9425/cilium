@@ -23,6 +23,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"go4.org/netipx"
 	"golang.org/x/time/rate"
 
 	"github.com/cilium/cilium/pkg/backoff"
@@ -30,7 +31,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipcache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
@@ -389,11 +389,9 @@ func (m *manager) backgroundSyncInterval() time.Duration {
 // backgroundSync ensures that local node has a valid datapath in-place for
 // each node in the cluster. See NodeValidateImplementation().
 func (m *manager) backgroundSync(ctx context.Context) error {
-	syncTimer, syncTimerDone := inctimer.New()
-	defer syncTimerDone()
 	for {
 		syncInterval := m.backgroundSyncInterval()
-		startWaiting := syncTimer.After(syncInterval)
+		startWaiting := time.After(syncInterval)
 		log.WithField("syncInterval", syncInterval.String()).Debug("Starting new iteration of background sync")
 		err := m.singleBackgroundLoop(ctx, syncInterval)
 		log.WithField("syncInterval", syncInterval.String()).Debug("Finished iteration of background sync")
@@ -610,7 +608,7 @@ func (m *manager) nodeIdentityLabels(n nodeTypes.Node) (nodeLabels labels.Labels
 		nodeLabels = labels.NewFrom(labels.LabelHost)
 		if m.conf.PolicyCIDRMatchesNodes() {
 			for _, address := range n.IPAddresses {
-				addr, ok := ip.AddrFromIP(address.IP)
+				addr, ok := netipx.FromStdIP(address.IP)
 				if ok {
 					bitLen := addr.BitLen()
 					if m.conf.EnableIPv4 && bitLen == net.IPv4len*8 ||
@@ -661,7 +659,7 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		// the IP is valid as long as it's coming from nodeTypes.Node. This
 		// object is created either from the node discovery (K8s) or from an
 		// event from the kvstore.
-		nodeIP, _ = ip.AddrFromIP(nIP)
+		nodeIP, _ = netipx.FromStdIP(nIP)
 	}
 
 	resource := ipcacheTypes.NewResourceID(ipcacheTypes.ResourceKindNode, "", n.Name)
@@ -858,7 +856,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 	var oldNodeIP netip.Addr
 	if nIP := oldNode.GetNodeIP(false); nIP != nil {
 		// See comment in NodeUpdated().
-		oldNodeIP, _ = ip.AddrFromIP(nIP)
+		oldNodeIP, _ = netipx.FromStdIP(nIP)
 	}
 	oldNodeLabels, oldNodeIdentityOverride := m.nodeIdentityLabels(oldNode)
 
@@ -871,7 +869,7 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 		}
 
 		if address.Type == addressing.NodeInternalIP && !slices.Contains(ipsetEntries, oldPrefix) {
-			addr, ok := ip.AddrFromIP(address.IP)
+			addr, ok := netipx.FromStdIP(address.IP)
 			if !ok {
 				log.WithField(logfields.IPAddr, address.IP).Error("unable to convert to netip.Addr")
 				continue
@@ -1043,7 +1041,7 @@ func (m *manager) MeshNodeSync() {
 
 func (m *manager) pruneNodes(includeMeshed bool) {
 	m.mutex.Lock()
-	if m.restoredNodes == nil || len(m.restoredNodes) == 0 {
+	if len(m.restoredNodes) == 0 {
 		m.mutex.Unlock()
 		return
 	}
@@ -1053,9 +1051,17 @@ func (m *manager) pruneNodes(includeMeshed bool) {
 	}
 
 	if len(m.restoredNodes) > 0 {
-		log.WithFields(logrus.Fields{
-			"stale-nodes": m.restoredNodes,
-		}).Info("Deleting stale nodes")
+		if log.Logger.IsLevelEnabled(logrus.DebugLevel) {
+			printableNodes := make([]string, 0, len(m.restoredNodes))
+			for ni := range m.restoredNodes {
+				printableNodes = append(printableNodes, ni.String())
+			}
+			log.WithFields(logrus.Fields{
+				"stale-nodes": printableNodes,
+			}).Debugf("Deleting %v stale nodes", len(m.restoredNodes))
+		} else {
+			log.Infof("Deleting %v stale nodes", len(m.restoredNodes))
+		}
 	}
 	m.mutex.Unlock()
 
@@ -1126,8 +1132,9 @@ func (m *manager) StartNodeNeighborLinkUpdater(nh datapath.NodeNeighbors) {
 
 					log.Debugf("Refreshing node neighbor link for %s", e.node.Name)
 					hr := sc.NewScope(e.node.Name)
-					if errs = errors.Join(errs, nh.NodeNeighborRefresh(ctx, *e.node, e.refresh)); errs != nil {
-						hr.Degraded("Failed node neighbor link update", errs)
+					if err := nh.NodeNeighborRefresh(ctx, *e.node, e.refresh); err != nil {
+						hr.Degraded("Failed node neighbor link update", err)
+						errs = errors.Join(errs, err)
 					} else {
 						hr.OK("Node neighbor link update successful")
 					}

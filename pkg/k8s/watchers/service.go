@@ -6,6 +6,7 @@ package watchers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
-	"github.com/cilium/cilium/pkg/bgp/speaker"
+	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/ip"
@@ -27,6 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/redirectpolicy"
 	"github.com/cilium/cilium/pkg/safetime"
@@ -43,10 +45,10 @@ type k8sServiceWatcherParams struct {
 	K8sResourceSynced *k8sSynced.Resources
 	K8sAPIGroups      *k8sSynced.APIGroups
 
-	ServiceCache      *k8s.ServiceCache
-	ServiceManager    service.ServiceManager
-	LRPManager        *redirectpolicy.Manager
-	MetalLBBgpSpeaker speaker.MetalLBBgpSpeaker
+	ServiceCache   *k8s.ServiceCache
+	ServiceManager service.ServiceManager
+	LRPManager     *redirectpolicy.Manager
+	LocalNodeStore *node.LocalNodeStore
 }
 
 func newK8sServiceWatcher(params k8sServiceWatcherParams) *K8sServiceWatcher {
@@ -58,7 +60,7 @@ func newK8sServiceWatcher(params k8sServiceWatcherParams) *K8sServiceWatcher {
 		k8sSvcCache:           params.ServiceCache,
 		svcManager:            params.ServiceManager,
 		redirectPolicyManager: params.LRPManager,
-		bgpSpeakerManager:     params.MetalLBBgpSpeaker,
+		localNodeStore:        params.LocalNodeStore,
 		stop:                  make(chan struct{}),
 	}
 }
@@ -77,7 +79,7 @@ type K8sServiceWatcher struct {
 	k8sSvcCache           *k8s.ServiceCache
 	svcManager            svcManager
 	redirectPolicyManager redirectPolicyManager
-	bgpSpeakerManager     bgpSpeakerManager
+	localNodeStore        *node.LocalNodeStore
 
 	stop chan struct{}
 }
@@ -141,7 +143,6 @@ func (k *K8sServiceWatcher) upsertK8sServiceV1(svc *slim_corev1.Service, swg *lo
 			k.redirectPolicyManager.OnAddService(svcID)
 		}
 	}
-	k.bgpSpeakerManager.OnUpdateService(svc)
 }
 
 func (k *K8sServiceWatcher) deleteK8sServiceV1(svc *slim_corev1.Service, swg *lock.StoppableWaitGroup) {
@@ -152,7 +153,6 @@ func (k *K8sServiceWatcher) deleteK8sServiceV1(svc *slim_corev1.Service, swg *lo
 			k.redirectPolicyManager.OnDeleteService(svcID)
 		}
 	}
-	k.bgpSpeakerManager.OnDeleteService(svc)
 }
 
 func (k *K8sServiceWatcher) k8sServiceHandler() {
@@ -204,61 +204,67 @@ func (k *K8sServiceWatcher) RunK8sServiceHandler() {
 }
 
 func (k *K8sServiceWatcher) delK8sSVCs(svc k8s.ServiceID, svcInfo *k8s.Service) {
-	// Headless services do not need any datapath implementation
-	if svcInfo.IsHeadless {
+	// Cleanup any headless services with a frontend IP as services may still be
+	// marked as headless if labeled with `service.kubernetes.io/headless`.
+	if svcInfo.IsHeadless && len(svcInfo.FrontendIPs) == 0 {
 		return
 	}
-
 	scopedLog := log.WithFields(logrus.Fields{
 		logfields.K8sSvcName:   svc.Name,
 		logfields.K8sNamespace: svc.Namespace,
 	})
 
-	repPorts := svcInfo.UniquePorts()
-
-	frontends := []*loadbalancer.L3n4Addr{}
-
-	for portName, svcPort := range svcInfo.Ports {
-		if !repPorts[svcPort.Port] {
-			continue
-		}
-		repPorts[svcPort.Port] = false
-
-		for _, feIP := range svcInfo.FrontendIPs {
-			fe := loadbalancer.NewL3n4Addr(svcPort.Protocol, cmtypes.MustAddrClusterFromIP(feIP), svcPort.Port, loadbalancer.ScopeExternal)
-			frontends = append(frontends, fe)
+	for _, checkProtocol := range []bool{true, false} {
+		if !checkProtocol {
+			svcInfo = stripServiceProtocol(svcInfo)
 		}
 
-		for _, nodePortFE := range svcInfo.NodePorts[portName] {
-			frontends = append(frontends, &nodePortFE.L3n4Addr)
-			if svcInfo.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal || svcInfo.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
-				cpFE := nodePortFE.L3n4Addr.DeepCopy()
-				cpFE.Scope = loadbalancer.ScopeInternal
-				frontends = append(frontends, cpFE)
+		repPorts := svcInfo.UniquePorts()
+
+		frontends := []*loadbalancer.L3n4Addr{}
+
+		for portName, svcPort := range svcInfo.Ports {
+			if !repPorts[svcPort.String()] {
+				continue
+			}
+			repPorts[svcPort.String()] = false
+
+			for _, feIP := range svcInfo.FrontendIPs {
+				fe := loadbalancer.NewL3n4Addr(svcPort.Protocol, cmtypes.MustAddrClusterFromIP(feIP), svcPort.Port, loadbalancer.ScopeExternal)
+				frontends = append(frontends, fe)
+			}
+
+			for _, nodePortFE := range svcInfo.NodePorts[portName] {
+				frontends = append(frontends, &nodePortFE.L3n4Addr)
+				if svcInfo.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal || svcInfo.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
+					cpFE := nodePortFE.L3n4Addr.DeepCopy()
+					cpFE.Scope = loadbalancer.ScopeInternal
+					frontends = append(frontends, cpFE)
+				}
+			}
+
+			for _, k8sExternalIP := range svcInfo.K8sExternalIPs {
+				frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, cmtypes.MustAddrClusterFromIP(k8sExternalIP), svcPort.Port, loadbalancer.ScopeExternal))
+			}
+
+			for _, ip := range svcInfo.LoadBalancerIPs {
+				addrCluster := cmtypes.MustAddrClusterFromIP(ip)
+				frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, addrCluster, svcPort.Port, loadbalancer.ScopeExternal))
+				if svcInfo.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal || svcInfo.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
+					frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, addrCluster, svcPort.Port, loadbalancer.ScopeInternal))
+				}
 			}
 		}
 
-		for _, k8sExternalIP := range svcInfo.K8sExternalIPs {
-			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, cmtypes.MustAddrClusterFromIP(k8sExternalIP), svcPort.Port, loadbalancer.ScopeExternal))
-		}
-
-		for _, ip := range svcInfo.LoadBalancerIPs {
-			addrCluster := cmtypes.MustAddrClusterFromIP(ip)
-			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, addrCluster, svcPort.Port, loadbalancer.ScopeExternal))
-			if svcInfo.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal || svcInfo.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
-				frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, addrCluster, svcPort.Port, loadbalancer.ScopeInternal))
+		for _, fe := range frontends {
+			if found, err := k.svcManager.DeleteService(*fe); err != nil {
+				scopedLog.WithError(err).WithField(logfields.Object, logfields.Repr(fe)).
+					Warn("Error deleting service by frontend")
+			} else if !found {
+				scopedLog.WithField(logfields.Object, logfields.Repr(fe)).Warn("service not found")
+			} else {
+				scopedLog.Debugf("# cilium lb delete-service %s %d 0", fe.AddrCluster.String(), fe.Port)
 			}
-		}
-	}
-
-	for _, fe := range frontends {
-		if found, err := k.svcManager.DeleteService(*fe); err != nil {
-			scopedLog.WithError(err).WithField(logfields.Object, logfields.Repr(fe)).
-				Warn("Error deleting service by frontend")
-		} else if !found {
-			scopedLog.WithField(logfields.Object, logfields.Repr(fe)).Warn("service not found")
-		} else {
-			scopedLog.Debugf("# cilium lb delete-service %s %d 0", fe.AddrCluster.String(), fe.Port)
 		}
 	}
 }
@@ -351,16 +357,35 @@ func genCartesianProduct(
 	return svcs
 }
 
+func configureWithSourceRanges(svcType loadbalancer.SVCType) bool {
+	switch svcType {
+	case loadbalancer.SVCTypeLoadBalancer:
+		return true
+	case loadbalancer.SVCTypeNodePort:
+		return option.Config.LBSourceRangeAllTypes
+	case loadbalancer.SVCTypeClusterIP:
+		// ClusterIP is only needed here when exposed to N/S traffic.
+		return option.Config.LBSourceRangeAllTypes && option.Config.ExternalClusterIP
+	default:
+		return false
+	}
+}
+
 // datapathSVCs returns all services that should be set in the datapath.
-func datapathSVCs(svc *k8s.Service, endpoints *k8s.Endpoints) (svcs []loadbalancer.SVC) {
+func (k *K8sServiceWatcher) datapathSVCs(svc *k8s.Service, endpoints *k8s.Endpoints) ([]loadbalancer.SVC, error) {
+	svcs := []loadbalancer.SVC{}
+
+	if nodeMatches, err := k.checkServiceNodeExposure(svc); err != nil || !nodeMatches {
+		return svcs, err
+	}
 	uniqPorts := svc.UniquePorts()
 
 	clusterIPPorts := map[loadbalancer.FEPortName]*loadbalancer.L4Addr{}
 	for fePortName, fePort := range svc.Ports {
-		if !uniqPorts[fePort.Port] {
+		if !uniqPorts[fePort.String()] {
 			continue
 		}
-		uniqPorts[fePort.Port] = false
+		uniqPorts[fePort.String()] = false
 		clusterIPPorts[fePortName] = fePort
 	}
 
@@ -398,18 +423,39 @@ func datapathSVCs(svc *k8s.Service, endpoints *k8s.Endpoints) (svcs []loadbalanc
 
 	// apply common service properties
 	for i := range svcs {
+		svcs[i].ForwardingMode = svc.ForwardingMode
+		svcs[i].LoadBalancerAlgorithm = svc.LoadBalancerAlgorithm
 		svcs[i].ExtTrafficPolicy = svc.ExtTrafficPolicy
 		svcs[i].IntTrafficPolicy = svc.IntTrafficPolicy
 		svcs[i].HealthCheckNodePort = svc.HealthCheckNodePort
 		svcs[i].SessionAffinity = svc.SessionAffinity
 		svcs[i].SessionAffinityTimeoutSec = svc.SessionAffinityTimeoutSec
-		if svcs[i].Type == loadbalancer.SVCTypeLoadBalancer {
+		svcs[i].Annotations = svc.Annotations
+		svcs[i].SourceRangesPolicy = svc.SourceRangesPolicy
+		if configureWithSourceRanges(svcs[i].Type) {
 			svcs[i].LoadBalancerSourceRanges = lbSrcRanges
 		}
-		svcs[i].Annotations = svc.Annotations
 	}
 
-	return svcs
+	return svcs, nil
+}
+
+// checkServiceNodeExposure returns true if the service should be installed onto the
+// local node, and false if the node should ignore and not install the service.
+func (k *K8sServiceWatcher) checkServiceNodeExposure(svc *k8s.Service) (bool, error) {
+	if serviceAnnotationValue, serviceAnnotationExists := svc.Annotations[annotation.ServiceNodeExposure]; serviceAnnotationExists {
+		ln, err := k.localNodeStore.Get(context.Background())
+		if err != nil {
+			return false, fmt.Errorf("failed to retrieve local node: %w", err)
+		}
+
+		nodeLabelValue, nodeLabelExists := ln.Labels[annotation.ServiceNodeExposure]
+		if !nodeLabelExists || nodeLabelValue != serviceAnnotationValue {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 // hashSVCMap returns a mapping of all frontend's hash to the its corresponded
@@ -422,9 +468,42 @@ func hashSVCMap(svcs []loadbalancer.SVC) map[string]loadbalancer.L3n4Addr {
 	return m
 }
 
+func stripServiceProtocol(svc *k8s.Service) *k8s.Service {
+	if svc == nil {
+		return nil
+	}
+
+	svc = svc.DeepCopy()
+
+	for _, port := range svc.Ports {
+		port.Protocol = "ANY"
+	}
+
+	for _, nodePort := range svc.NodePorts {
+		for _, port := range nodePort {
+			port.Protocol = "ANY"
+		}
+	}
+
+	return svc
+}
+
+func stripEndpointsProtocol(endpoints *k8s.Endpoints) *k8s.Endpoints {
+	endpoints = endpoints.DeepCopy()
+
+	for _, backend := range endpoints.Backends {
+		for _, port := range backend.Ports {
+			port.Protocol = "ANY"
+		}
+	}
+
+	return endpoints
+}
+
 func (k *K8sServiceWatcher) addK8sSVCs(svcID k8s.ServiceID, oldSvc, svc *k8s.Service, endpoints *k8s.Endpoints) {
 	// Headless services do not need any datapath implementation
 	if svc.IsHeadless {
+		k.delK8sSVCs(svcID, svc)
 		return
 	}
 
@@ -433,14 +512,27 @@ func (k *K8sServiceWatcher) addK8sSVCs(svcID k8s.ServiceID, oldSvc, svc *k8s.Ser
 		logfields.K8sNamespace: svcID.Namespace,
 	})
 
-	svcs := datapathSVCs(svc, endpoints)
+	if !option.Config.LoadBalancerProtocolDifferentiation {
+		oldSvc = stripServiceProtocol(oldSvc)
+		svc = stripServiceProtocol(svc)
+		endpoints = stripEndpointsProtocol(endpoints)
+	}
+
+	svcs, err := k.datapathSVCs(svc, endpoints)
+	if err != nil {
+		scopedLog.WithError(err).Error("Error while evaluating datapath services")
+		return
+	}
 	svcMap := hashSVCMap(svcs)
 
 	if oldSvc != nil {
 		// If we have oldService then we need to detect which frontends
 		// are no longer in the updated service and delete them in the datapath.
-
-		oldSVCs := datapathSVCs(oldSvc, endpoints)
+		oldSVCs, err := k.datapathSVCs(oldSvc, endpoints)
+		if err != nil {
+			scopedLog.WithError(err).Error("Error while evaluating datapath services for old service")
+			return
+		}
 		oldSVCMap := hashSVCMap(oldSVCs)
 
 		for svcHash, oldSvc := range oldSVCMap {
@@ -462,13 +554,16 @@ func (k *K8sServiceWatcher) addK8sSVCs(svcID k8s.ServiceID, oldSvc, svc *k8s.Ser
 			Frontend:                  dpSvc.Frontend,
 			Backends:                  dpSvc.Backends,
 			Type:                      dpSvc.Type,
+			ForwardingMode:            dpSvc.ForwardingMode,
 			ExtTrafficPolicy:          dpSvc.ExtTrafficPolicy,
 			IntTrafficPolicy:          dpSvc.IntTrafficPolicy,
 			SessionAffinity:           dpSvc.SessionAffinity,
 			SessionAffinityTimeoutSec: dpSvc.SessionAffinityTimeoutSec,
 			HealthCheckNodePort:       dpSvc.HealthCheckNodePort,
 			Annotations:               dpSvc.Annotations,
+			SourceRangesPolicy:        dpSvc.SourceRangesPolicy,
 			LoadBalancerSourceRanges:  dpSvc.LoadBalancerSourceRanges,
+			LoadBalancerAlgorithm:     dpSvc.LoadBalancerAlgorithm,
 			Name: loadbalancer.ServiceName{
 				Name:      svcID.Name,
 				Namespace: svcID.Namespace,

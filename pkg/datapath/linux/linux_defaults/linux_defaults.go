@@ -33,19 +33,11 @@ const (
 
 	// RouteMarkDecrypt is the default route mark to use to indicate datapath
 	// needs to decrypt a packet.
-	RouteMarkDecrypt = 0x0D00
-
-	// RouteMarkDecryptedOverlay is the output mark used for EncryptedOverlay
-	// XFRM policies.
-	//
-	// When this mark is present on a packet it indicates that overlay traffic
-	// was decrypted by XFRM and should be forwarded to a tunnel device for
-	// decapsulation.
-	RouteMarkDecryptedOverlay = 0x1D00
+	RouteMarkDecrypt = MagicMarkDecrypt
 
 	// RouteMarkEncrypt is the default route mark to use to indicate datapath
 	// needs to encrypt a packet.
-	RouteMarkEncrypt = 0x0E00
+	RouteMarkEncrypt = MagicMarkEncrypt
 
 	// RouteMarkMask is the mask required for the route mark value
 	RouteMarkMask = 0xF00
@@ -126,12 +118,8 @@ const (
 	// IPsecMarkBitMask is the mask used for the encrypt and decrypt bits.
 	IPsecMarkBitMask = 0x0F00
 
-	// IPsecOldMarkMaskOut is the mask that was previously used. It can be
-	// removed in Cilium v1.17.
-	IPsecOldMarkMaskOut = 0xFF00
-
 	// IPsecMarkMask is the mask required for the IPsec SPI, node ID, and encrypt/decrypt bits
-	IPsecMarkMaskOut = IPsecOldMarkMaskOut | IPsecMarkMaskNodeID
+	IPsecMarkMaskOut = 0xFF00 | IPsecMarkMaskNodeID
 
 	// IPsecMarkMaskIn is the mask required for the IPsec node ID and encrypt/decrypt bits
 	IPsecMarkMaskIn = IPsecMarkBitMask | IPsecMarkMaskNodeID

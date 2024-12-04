@@ -270,34 +270,21 @@ Cilium to the state it was in prior to the upgrade.
 Version Specific Notes
 ======================
 
-This section documents the specific steps required for upgrading from one
-version of Cilium to another version of Cilium. There are particular version
-transitions which are suggested by the Cilium developers to avoid known issues
-during upgrade, then subsequently there are sections for specific upgrade
-transitions, ordered by version.
+This section details the upgrade notes specific to |CURRENT_RELEASE|. Read them
+carefully and take the suggested actions before upgrading Cilium to |CURRENT_RELEASE|.
+For upgrades to earlier releases, see the
+:prev-docs:`upgrade notes to the previous version <operations/upgrade/#upgrade-notes>`.
 
-The table below lists suggested upgrade transitions, from a specified current
-version running in a cluster to a specified target version. If a specific
-combination is not listed in the table below, then it may not be safe. In that
-case, consider performing incremental upgrades between versions (e.g. upgrade
-from ``1.12.x`` to ``1.13.y`` first, and to ``1.14.z`` only afterwards).
+The only tested upgrade and rollback path is between consecutive minor releases.
+Always perform upgrades and rollbacks between one minor release at a time.
+Additionally, always update to the latest patch release of your current version
+before attempting an upgrade.
 
-+-----------------------+-----------------------+-------------------------+---------------------------+
-| Current version       | Target version        | L3/L4 impact            | L7 impact                 |
-+=======================+=======================+=========================+===========================+
-| ``1.13.x``            | ``1.14.y``            | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+-------------------------+---------------------------+
-| ``1.12.x``            | ``1.13.y``            | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+-------------------------+---------------------------+
-| ``1.11.x``            | ``1.12.y``            | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+-------------------------+---------------------------+
-
-Annotations:
-
-#. **Clients must reconnect**: Any traffic flowing via a proxy (for example,
-   because an L7 policy is in place) will be disrupted during upgrade.
-   Endpoints communicating via the proxy must reconnect to re-establish
-   connections.
+Tested upgrades are expected to have minimal to no impact on new and existing
+connections matched by either no Network Policies, or L3/L4 Network Policies only.
+Any traffic flowing via user space proxies (for example, because an L7 policy is
+in place, or using Ingress/Gateway API) will be disrupted during upgrade. Endpoints
+communicating via the proxy must reconnect to re-establish connections.
 
 .. _current_release_required_changes:
 
@@ -307,34 +294,118 @@ Annotations:
 ------------------
 
 * Operating Cilium in ``--datapath-mode=lb-only`` for plain Docker mode now requires to
-  add an additional ``--bpf-lb-external-control-plane=true`` to the command line, otherwise
-  it is assumed that Kubernetes is present.
+  add an additional ``--enable-k8s=false`` to the command line, otherwise it is assumed
+  that Kubernetes is present.
+* The Kubernetes clients used by Cilium Agent and Cilium Operator now have separately configurable
+  rate limits. The default rate limit for Cilium Operator K8s clients has been increased to
+  100 QPS/200 Burst. To configure the rate limit for Cilium Operator, use the
+  ``--operator-k8s-client-qps`` and ``--operator-k8s-client-burst`` flags or the corresponding
+  Helm values.
+* Support for Consul, deprecated since v1.12, has been removed.
+* Cilium now supports services protocol differentiation, which allows the agent to distinguish two
+  services on the same port with different protocols (e.g. TCP and UDP).
+  This feature, enabled by default, can be controlled with the ``--bpf-lb-proto-diff`` flag.
+  After the upgrade, existing services without a protocol set will be preserved as such, to avoid any
+  connection disruptions, and will need to be deleted and recreated in order for their protocol to
+  be taken into account by the agent.
+  In case of downgrades to a version that doesn't support services protocol differentiation,
+  existing services with the protocol set will be deleted and recreated, without the protocol, by
+  the agent, causing connection disruptions for such services.
+* MTU auto-detection is now continuous during agent lifetime, changing device MTU no longer requires
+  restarting the agent to pick up the new MTU.
+* MTU auto-detection will now use the lowest MTU of all external interfaces. Before, only the primary
+  interface was considered. One exception to this is in ENI mode where the secondary interfaces are not
+  considered for MTU auto-detection. MTU can still be configured manually via the ``MTU`` helm option,
+  ``--mtu`` agent flag or ``mtu`` option in CNI configuration.
+* Support for L7 protocol visibility using Pod annotations (``policy.cilium.io/proxy-visibility``),
+  deprecated since v1.15, has been removed.
+* The Cilium cluster name validation cannot be bypassed anymore, both for the local and
+  remote clusters. The cluster name is strictly enforced to consist of at most 32 lower
+  case alphanumeric characters and '-', start and end with an alphanumeric character.
+* Cilium could previously be run in a configuration where the Etcd instances
+  that distribute Cilium state between nodes would be managed in pod network by
+  Cilium itself. This support, which had been previously deprecated as complicated
+  and error prone, has now been removed. Refer to :ref:`k8s_install_etcd` for
+  alternatives for running Cilium with Etcd.
+* For IPsec, support for a single key has been removed. Per-tunnel keys will
+  now be used regardless of the presence of the ``+`` sign in the secret.
+* The option to run a synchronous probe using ``cilium-health status --probe`` is no longer supported,
+  and is now a hidden option that returns the results of the most recent cached probe. It will be 
+  removed in a future release.
+* The Cilium status API now reports the KVStore subsystem with ``Disabled`` state when disabled,
+  instead of ``OK`` state and ``Disabled`` message.
 
 Removed Options
 ~~~~~~~~~~~~~~~
 
+* The previously deprecated ``clustermesh-ip-identities-sync-timeout`` flag has
+  been removed in favor of ``clustermesh-sync-timeout``.
+* The previously deprecated built-in WireGuard userspace-mode fallback (Helm ``wireguard.userspaceFallback``)
+  has been removed. Users of WireGuard transparent encryption are required to use a Linux kernel with
+  WireGuard support.
+
 Deprecated Options
 ~~~~~~~~~~~~~~~~~~
+
+* The hubble-relay flag ``--dial-timeout`` has been deprecated (now a no-op)
+  and will be removed in Cilium 1.18.
 
 Helm Options
 ~~~~~~~~~~~~
 
+* The Helm options ``hubble.tls.server.cert``, ``hubble.tls.server.key``,
+  ``hubble.relay.tls.client.cert``, ``hubble.relay.tls.client.key``,
+  ``hubble.relay.tls.server.cert``, ``hubble.relay.tls.server.key``,
+  ``hubble.ui.tls.client.cert``, and ``hubble.ui.tls.client.key`` have been
+  deprecated in favor of the associated ``existingSecret`` options and will be
+  removed in a future release.
+* The default value of ``hubble.tls.auto.certValidityDuration`` has been
+  lowered from 1095 days to 365 days because recent versions of MacOS will fail
+  to validate certificates with expirations longer than 825 days.
+* The Helm option ``hubble.relay.dialTimeout`` has been deprecated (now a no-op)
+  and will be removed in Cilium 1.18.
+
+Agent Options
+~~~~~~~~~~~~~
+
+* The ``CONNTRACK_LOCAL`` option has been deprecated and will be removed in a
+  future release.
+
+Bugtool Options
+~~~~~~~~~~~~~~~
+
+* The flag ``k8s-mode`` (and related flags ``cilium-agent-container-name``, ``k8s-namespace`` & ``k8s-label``)
+  have been deprecated and will be removed in a Cilium 1.18. Cilium CLI should be used to gather a sysdump from a K8s cluster.
+
 Added Metrics
 ~~~~~~~~~~~~~
+* ``cilium_node_health_connectivity_status``
+* ``cilium_node_health_connectivity_latency_seconds``
+* ``cilium_operator_unmanaged_pods``
+* ``cilium_policy_selector_match_count_max``
 
 Removed Metrics
 ~~~~~~~~~~~~~~~
+* ``cilium_cidrgroup_translation_time_stats_seconds`` has been removed, as the measured code path no longer exists.
 
 Changed Metrics
 ~~~~~~~~~~~~~~~
 
-.. _earlier_upgrade_notes:
+Deprecated Metrics
+~~~~~~~~~~~~~~~~~~
+* ``cilium_node_connectivity_status`` is now deprecated. Please use ``cilium_node_health_connectivity_status`` instead.
+* ``cilium_node_connectivity_latency_seconds`` is now deprecated. Please use ``cilium_node_health_connectivity_latency_seconds`` instead.
 
-Earlier Upgrade Notes
----------------------
+Hubble CLI
+~~~~~~~~~~
 
-For upgrades from earlier releases, see the
-:prev-docs:`upgrade notes from the previous version <operations/upgrade/#upgrade-notes>`.
+* the ``--cluster`` behavior changed to show flows emitted from nodes outside of
+  the provided cluster name (either coming from or going to the target cluster).
+  This change brings consistency between the ``--cluster`` and ``--namespace``
+  flags and removed the incompatibility between the ``--cluster`` and
+  ``--node-name`` flags. The previous behavior of ``--cluster foo`` can be
+  reproduced with ``--node-name foo/`` (shows all flows emitted from a node in
+  cluster ``foo``).
 
 Advanced
 ========
@@ -413,7 +484,7 @@ Generate the latest ConfigMap
 
     helm template cilium \
       --namespace=kube-system \
-      --set agent.enabled=false \
+      --set agent=false \
       --set config.enabled=true \
       --set operator.enabled=false \
       > cilium-configmap.yaml
@@ -480,36 +551,48 @@ As the :term:`ConfigMap` is successfully upgraded we can start upgrading Cilium
 Migrating from kvstore-backed identities to Kubernetes CRD-backed identities
 ----------------------------------------------------------------------------
 
-Beginning with cilium 1.6, Kubernetes CRD-backed security identities can be
-used for smaller clusters. Along with other changes in 1.6 this allows
+Beginning with Cilium 1.6, Kubernetes CRD-backed security identities can be
+used for smaller clusters. Along with other changes in 1.6, this allows
 kvstore-free operation if desired. It is possible to migrate identities from an
 existing kvstore deployment to CRD-backed identities. This minimizes
 disruptions to traffic as the update rolls out through the cluster.
 
-Affected versions
-~~~~~~~~~~~~~~~~~
+Migration
+~~~~~~~~~
 
-* Cilium 1.6 deployments using kvstore-backend identities
-
-Mitigation
-~~~~~~~~~~
-
-When identities change, existing connections can be disrupted while cilium
+When identities change, existing connections can be disrupted while Cilium
 initializes and synchronizes with the shared identity store. The disruption
 occurs when new numeric identities are used for existing pods on some instances
 and others are used on others. When converting to CRD-backed identities, it is
 possible to pre-allocate CRD identities so that the numeric identities match
-those in the kvstore. This allows new and old cilium instances in the rollout
+those in the kvstore. This allows new and old Cilium instances in the rollout
 to agree.
 
-The steps below show an example of such a migration. It is safe to re-run the
-command if desired. It will identify already allocated identities or ones that
+There are two ways to achieve this: you can either run a one-off ``cilium preflight migrate-identity`` script
+which will perform a point-in-time copy of all identities from the kvstore to CRDs (added in Cilium 1.6), or use the "Double Write" identity
+allocation mode which will have Cilium manage identities in both the kvstore and CRD at the same time for a seamless migration (added in Cilium 1.17).
+
+Migration with the ``cilium preflight migrate-identity`` script
+###############################################################
+
+The ``cilium preflight migrate-identity`` script is a one-off tool that can be used to copy identities from the kvstore into CRDs.
+It has a couple of limitations:
+
+* If an identity is created in the kvstore after the one-off migration has been completed, it will not be copied into a CRD.
+  This means that you need to perform the migration on a cluster with no identity churn.
+* There is no easy way to revert back to ``--identity-allocation-mode=kvstore`` if something goes wrong after
+  Cilium has been migrated to ``--identity-allocation-mode=crd``
+
+If these limitations are not acceptable, it is recommended to use the ":ref:`Double Write <double_write_migration>`" identity allocation mode instead.
+
+The following steps show an example of performing the migration using the ``cilium preflight migrate-identity`` script.
+It is safe to re-run the command if desired. It will identify already allocated identities or ones that
 cannot be migrated. Note that identity ``34815`` is migrated, ``17003`` is
 already migrated, and ``11730`` has a conflict and a new ID allocated for those
 labels.
 
 The steps below assume a stable cluster with no new identities created during
-the rollout. Once a cilium using CRD-backed identities is running, it may begin
+the rollout. Once Cilium using CRD-backed identities is running, it may begin
 allocating identities in a way that conflicts with older ones in the kvstore.
 
 The cilium preflight manifest requires etcd support and can be built with:
@@ -519,7 +602,7 @@ The cilium preflight manifest requires etcd support and can be built with:
     helm template cilium \
       --namespace=kube-system \
       --set preflight.enabled=true \
-      --set agent.enabled=false \
+      --set agent=false \
       --set config.enabled=false \
       --set operator.enabled=false \
       --set etcd.enabled=true \
@@ -580,11 +663,61 @@ Once the migration is complete, confirm the endpoint identities match by listing
 Clearing CRD identities
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-If a migration has gone wrong, it possible to start with a clean slate. Ensure that no cilium instances are running with identity-allocation-mode crd and execute:
+If a migration has gone wrong, it possible to start with a clean slate. Ensure that no Cilium instances are running with ``--identity-allocation-mode=crd`` and execute:
 
 .. code-block:: shell-session
 
       $ kubectl delete ciliumid --all
+
+.. _double_write_migration:
+
+Migration with the "Double Write" identity allocation mode
+##########################################################
+
+.. include:: ../beta.rst
+
+The "Double Write" Identity Allocation Mode allows Cilium to allocate identities as KVStore values *and* as CRDs at the
+same time. This mode also has two versions: one where the source of truth comes from the kvstore (``--identity-allocation-mode=doublewrite-readkvstore``),
+and one where the source of truth comes from CRDs (``--identity-allocation-mode=doublewrite-readcrd``).
+
+.. note::
+
+    "Double Write" mode is not compatible with Consul as the KVStore
+
+The high-level migration plan looks as follows:
+
+#. Starting state: Cilium is running in KVStore mode.
+#. Switch Cilium to “Double Write” mode with all reads happening from the KVStore. This is almost the same as the
+   pure KVStore mode with the only difference being that all identities are duplicated as CRDs but are not used.
+#. Switch Cilium to “Double Write” mode with all reads happening from CRDs. This is equivalent to Cilium running in
+   pure CRD mode but identities will still be updated in the KVStore to allow for the possibility of a fast rollback.
+#. Switch Cilium to CRD mode. The KVStore will no longer be used and will be ready for decommission.
+
+This will allow you to perform a gradual and seamless migration with the possibility of a fast rollback at steps two or three.
+
+Furthermore, when the "Double Write" mode is enabled, the Operator will emit additional metrics to help monitor the
+migration progress. These metrics can be used for alerting about identity inconsistencies between the KVStore and CRDs.
+
+Note that you can also use this to migrate from CRD to KVStore mode. All operations simply need to be repeated in reverse order.
+
+Rollout Instructions
+~~~~~~~~~~~~~~~~~~~~
+
+#. Re-deploy first the Operator and then the Agents with ``--identity-allocation-mode=doublewrite-readkvstore``.
+#. Monitor the Operator metrics and logs to ensure that all identities have converged between the KVStore and CRDs. The relevant metrics emitted by the Operator are:
+
+   * ``cilium_operator_identity_crd_total_count`` and ``cilium_operator_identity_kvstore_total_count`` report the total number of identities in CRDs and KVStore respectively.
+   * ``cilium_operator_identity_crd_only_count`` and ``cilium_operator_identity_kvstore_only_count`` report the number of
+     identities that are only in CRDs or only in the KVStore respectively, to help detect inconsistencies.
+
+   In case further investigation is needed, the Operator logs will contain detailed information about the discrepancies between KVStore and CRD identities.
+   Note that Garbage Collection for KVStore identities and CRD identities happens at slightly different times, so it is possible to see discrepancies in the metrics
+   for certain periods of time, depending on ``--identity-gc-interval`` and ``--identity-heartbeat-timeout`` settings.
+#. Once all identities have converged, re-deploy the Operator and the Agents with ``--identity-allocation-mode=doublewrite-readcrd``.
+   This will cause Cilium to read identities only from CRDs, but continue to write them to the KVStore.
+#. Once you are ready to decommission the KVStore, re-deploy first the Agents and then the Operator with ``--identity-allocation-mode=crd``.
+   This will make Cilium read and write identities only to CRDs.
+#. You can now decommission the KVStore.
 
 .. _cnp_validation:
 

@@ -11,6 +11,30 @@ bpf_clear_meta(struct xdp_md *ctx __maybe_unused)
 {
 }
 
+static __always_inline __maybe_unused void
+ctx_store_meta_ipv6(struct xdp_md *ctx __maybe_unused, const __u64 off,
+		    const union v6addr *addr)
+{
+	__u32 zero = 0, *data_meta = map_lookup_elem(&cilium_xdp_scratch, &zero);
+
+	if (always_succeeds(data_meta))
+		memcpy(&data_meta[off], addr, sizeof(*addr));
+
+	build_bug_on((off + 4) * sizeof(__u32) > META_PIVOT);
+}
+
+static __always_inline __maybe_unused void
+ctx_load_meta_ipv6(const struct xdp_md *ctx __maybe_unused,
+		   union v6addr *addr, const __u64 off)
+{
+	__u32 zero = 0, *data_meta = map_lookup_elem(&cilium_xdp_scratch, &zero);
+
+	if (always_succeeds(data_meta))
+		memcpy(addr, &data_meta[off], sizeof(*addr));
+
+	build_bug_on((off + 4) * sizeof(__u32) > META_PIVOT);
+}
+
 static __always_inline __maybe_unused int
 get_identity(struct xdp_md *ctx __maybe_unused)
 {
@@ -160,7 +184,7 @@ ctx_set_encap_info(struct xdp_md *ctx, __u32 src_ip, __be16 src_port,
 		   __u32 daddr, __u32 seclabel __maybe_unused,
 		   __u32 vni __maybe_unused, void *opt, __u32 opt_len)
 {
-	__u32 inner_len = ctx_full_len(ctx);
+	__u32 inner_len = (__u32)ctx_full_len(ctx);
 	__u32 tunnel_hdr_len = 8; /* geneve / vxlan */
 	void *data, *data_end;
 	struct ethhdr *eth;

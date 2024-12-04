@@ -12,7 +12,6 @@ import (
 
 	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
-	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -25,8 +24,13 @@ var (
 	)
 )
 
+// KVStoreNodesWaitFn is the type of the function used to wait for synchronization
+// of all nodes from the kvstore.
+type KVStoreNodesWaitFn wait.Fn
+
 // Regenerator wraps additional functionalities for endpoint regeneration.
 type Regenerator struct {
+	nodesWaitFn   KVStoreNodesWaitFn
 	cmWaitFn      wait.Fn
 	cmWaitTimeout time.Duration
 
@@ -40,6 +44,7 @@ func newRegenerator(in struct {
 	Logger logrus.FieldLogger
 
 	Config      wait.TimeoutConfig
+	NodesWaitFn KVStoreNodesWaitFn
 	ClusterMesh *clustermesh.ClusterMesh
 }) *Regenerator {
 	waitFn := func(context.Context) error { return nil }
@@ -49,24 +54,14 @@ func newRegenerator(in struct {
 
 	return &Regenerator{
 		logger:        in.Logger,
+		nodesWaitFn:   in.NodesWaitFn,
 		cmWaitFn:      waitFn,
-		cmWaitTimeout: in.Config.Timeout(),
+		cmWaitTimeout: in.Config.ClusterMeshSyncTimeout,
 	}
 }
 
-// CapTimeoutForSynchronousRegeneration caps the timeout to a value suitable in
-// case the regeneration of an endpoint needs to be performed synchronously
-// (currently required when IPSec is enabled). In particular, this is necessary
-// to not block the agent bootstrap, as that prevents the scheduling of new
-// workloads. This logic is implemented as a separate function to avoid
-// forgetting to remove it when the synchronous regeneration is removed.
-func (r *Regenerator) CapTimeoutForSynchronousRegeneration() {
-	const maxTimeout = 5 * time.Second
-	if r.cmWaitTimeout > maxTimeout {
-		r.cmWaitTimeout = maxTimeout
-		r.logger.WithField(logfields.Value, maxTimeout).
-			Info("Capped clustermesh-sync-timeout because endpoint regeneration needs to be performed synchronously")
-	}
+func (r *Regenerator) WaitForKVStoreNodesSync(ctx context.Context) error {
+	return r.nodesWaitFn(ctx)
 }
 
 func (r *Regenerator) WaitForClusterMeshIPIdentitiesSync(ctx context.Context) error {

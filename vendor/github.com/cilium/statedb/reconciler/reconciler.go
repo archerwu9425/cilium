@@ -6,6 +6,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"iter"
 	"time"
 
 	"github.com/cilium/hive/cell"
@@ -37,7 +38,7 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 
 	// Create the change iterator to watch for inserts and deletes to the table.
 	wtxn := r.DB.WriteTxn(r.config.Table)
-	changes, err := r.config.Table.Changes(wtxn)
+	changeIterator, err := r.config.Table.Changes(wtxn)
 	txn := wtxn.Commit()
 	if err != nil {
 		return fmt.Errorf("watching for changes failed: %w", err)
@@ -45,8 +46,10 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 
 	tableWatchChan := closedWatchChannel
 
-	tableInitialized := false
 	externalPrune := false
+
+	tableInitialized := false
+	_, tableInitWatch := r.config.Table.Initialized(txn)
 
 	for {
 		// Throttle a bit before reconciliation to allow for a bigger batch to arrive and
@@ -54,6 +57,7 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 		if err := r.config.RateLimiter.Wait(ctx); err != nil {
 			return err
 		}
+
 		prune := false
 
 		// Wait for trigger
@@ -64,6 +68,13 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 			// Object(s) are ready to be retried
 		case <-tableWatchChan:
 			// Table has changed
+		case <-tableInitWatch:
+			tableInitialized = true
+			tableInitWatch = nil
+
+			// Do an immediate pruning now as the table has finished
+			// initializing and pruning is enabled.
+			prune = r.config.PruneInterval != 0
 		case <-pruneTickerChan:
 			prune = true
 		case <-r.externalPruneTrigger:
@@ -73,25 +84,14 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 		// Grab a new snapshot and refresh the changes iterator to read
 		// in the new changes.
 		txn = r.DB.ReadTxn()
-		tableWatchChan = changes.Watch(txn)
+		var changes iter.Seq2[statedb.Change[Obj], statedb.Revision]
+		changes, tableWatchChan = changeIterator.Next(txn)
 
 		// Perform incremental reconciliation and retries of previously failed
 		// objects.
 		errs := r.incremental(ctx, txn, changes)
 
-		if !tableInitialized {
-			if r.config.Table.Initialized(txn) {
-				tableInitialized = true
-
-				// Do an immediate pruning now as the table has finished
-				// initializing and pruning is enabled.
-				prune = r.config.PruneInterval != 0
-			} else {
-				// Table not initialized yet, skip this pruning round.
-				prune = false
-			}
-		}
-		if prune || (tableInitialized && externalPrune) {
+		if tableInitialized && (prune || externalPrune) {
 			if err := r.prune(ctx, txn); err != nil {
 				errs = append(errs, err)
 			}
@@ -126,11 +126,9 @@ func (r *reconciler[Obj]) prune(ctx context.Context, txn statedb.ReadTxn) error 
 func (r *reconciler[Obj]) refreshLoop(ctx context.Context, health cell.Health) error {
 	lastRevision := statedb.Revision(0)
 
-	refreshTimer := time.NewTimer(r.config.RefreshInterval)
+	refreshTimer := time.NewTimer(0)
 	defer refreshTimer.Stop()
 
-	health.OK(fmt.Sprintf("Refreshing in %s", r.config.RefreshInterval))
-outer:
 	for {
 		// Wait until it's time to refresh.
 		select {
@@ -140,27 +138,25 @@ outer:
 		case <-refreshTimer.C:
 		}
 
-		now := time.Now()
+		durationUntilRefresh := r.config.RefreshInterval
 
 		// Iterate over the objects in revision order, e.g. oldest modification first.
 		// We look for objects that are older than [RefreshInterval] and mark them for
-		// pending in order for them to be reconciled again.
-		iter := r.config.Table.LowerBound(r.DB.ReadTxn(), statedb.ByRevision[Obj](lastRevision+1))
+		// refresh in order for them to be reconciled again.
+		seq := r.config.Table.LowerBound(r.DB.ReadTxn(), statedb.ByRevision[Obj](lastRevision+1))
 		indexer := r.config.Table.PrimaryIndexer()
-		for obj, rev, ok := iter.Next(); ok; obj, rev, ok = iter.Next() {
+
+		for obj, rev := range seq {
 			status := r.config.GetObjectStatus(obj)
 
+			// The duration elapsed since this object was last updated.
+			updatedSince := time.Since(status.UpdatedAt)
+
 			// Have we reached an object that is newer than RefreshInterval?
-			if now.Sub(status.UpdatedAt) < r.config.RefreshInterval {
-				// Reset the timer to fire when this now oldest object should be
-				// refreshed.
-				nextRefreshIn := min(
-					0,
-					now.Sub(status.UpdatedAt)-r.config.RefreshInterval,
-				)
-				refreshTimer.Reset(nextRefreshIn)
-				health.OK(fmt.Sprintf("Refreshing in %s", nextRefreshIn))
-				continue outer
+			// If so, wait until this now oldest object's UpdatedAt exceeds RefreshInterval.
+			if updatedSince < r.config.RefreshInterval {
+				durationUntilRefresh = r.config.RefreshInterval - updatedSince
+				break
 			}
 
 			lastRevision = rev
@@ -186,8 +182,7 @@ outer:
 			}
 		}
 
-		// Since we reached here there were no objects. Set the timer for the full
-		// RefreshInterval.
-		refreshTimer.Reset(r.config.RefreshInterval)
+		refreshTimer.Reset(durationUntilRefresh)
+		health.OK(fmt.Sprintf("Next refresh in %s", durationUntilRefresh))
 	}
 }

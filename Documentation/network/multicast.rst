@@ -54,7 +54,7 @@ subscriber list based on the application requirements. This is done by running
 Then, multicast subscriber pods can send out IGMP join and multicast
 sender pods can start sending multicast stream.
 
-As an example, the following guide uses ``239.25.0.1`` multicast group address.
+As an example, the following guide uses ``239.255.0.1`` multicast group address.
 
 Get all CiliumNode IP addresses to be set as multicast subscribers:
 
@@ -93,6 +93,21 @@ Then, set the subscriber IP addresses in each ``cilium-agent``:
 .. note::
 
    This multicast subscriber IP addresses are different CiliumNode IP addresses than your own one.
+
+
+To make all nodes join a specified multicast group, use the ``cilium multicast`` command.
+You can also get information about multicast groups and subscribers cluster-wide.
+
+.. code-block:: shell-session
+   
+   ### make all nodes join the specified multicast group
+   $ cilium multicast add --group-ip 239.255.0.1
+   ### confirm the multicast groups and subscribers
+   $ cilium multicast list subscriber --all
+   Node               Group         Subscriber     Type
+   cl-worker          239.255.0.1   10.244.0.196   Remote Node
+   cl-control-plane   239.255.0.1   10.244.1.122   Remote Node
+
 
 When you want to remove multicast IP addresses and subscriber list, run the following commands in the ``cilium-agent``.
 

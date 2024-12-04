@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/cilium/cilium/operator/pkg/model"
@@ -556,7 +557,8 @@ func Test_getService(t *testing.T) {
 					Name:      "cilium-gateway-test-long-long-long-long-long-long-lo-8tfth549c6",
 					Namespace: "default",
 					Labels: map[string]string{
-						owningGatewayLabel: "test-long-long-long-long-long-long-long-long-long-lo-4bftbgh5ht",
+						owningGatewayLabel:                       "test-long-long-long-long-long-long-long-long-long-lo-4bftbgh5ht",
+						"gateway.networking.k8s.io/gateway-name": "test-long-long-long-long-long-long-long-long-long-lo-4bftbgh5ht",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
@@ -564,7 +566,7 @@ func Test_getService(t *testing.T) {
 							Kind:       "Gateway",
 							Name:       "test-long-long-long-long-long-long-long-long-long-long-long-long-name",
 							UID:        types.UID("57889650-380b-4c05-9a2e-3baee7fd5271"),
-							Controller: model.AddressOf(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
@@ -599,7 +601,8 @@ func Test_getService(t *testing.T) {
 					Name:      "cilium-gateway-test-externaltrafficpolicy-local",
 					Namespace: "default",
 					Labels: map[string]string{
-						owningGatewayLabel: "test-externaltrafficpolicy-local",
+						owningGatewayLabel:                       "test-externaltrafficpolicy-local",
+						"gateway.networking.k8s.io/gateway-name": "test-externaltrafficpolicy-local",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
@@ -607,7 +610,7 @@ func Test_getService(t *testing.T) {
 							Kind:       "Gateway",
 							Name:       "test-externaltrafficpolicy-local",
 							UID:        types.UID("41b82697-2d8d-4776-81b6-44d0bbac7faa"),
-							Controller: model.AddressOf(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
@@ -629,7 +632,7 @@ func Test_getService(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := getService(tt.args.resource, tt.args.allPorts, tt.args.labels, tt.args.annotations, tt.args.externalTrafficPolicy)
 			assert.Equalf(t, tt.want, got, "getService(%v, %v, %v, %v)", tt.args.resource, tt.args.allPorts, tt.args.labels, tt.args.annotations)
-			assert.Equal(t, true, len(got.Name) <= 63, "Service name is too long")
+			assert.LessOrEqual(t, len(got.Name), 63, "Service name is too long")
 		})
 	}
 }

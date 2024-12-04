@@ -4,41 +4,71 @@
 package experimental
 
 import (
-	"slices"
-	"strconv"
+	"net/netip"
+	"strings"
 
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
 	"github.com/cilium/statedb/reconciler"
+	"k8s.io/apimachinery/pkg/util/duration"
 
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-type Frontend struct {
-	Address     loadbalancer.L3n4Addr    // Frontend address
-	Type        loadbalancer.SVCType     // Service type
-	ServiceName loadbalancer.ServiceName // Associated service
+// FrontendParams defines the static parameters of a frontend.
+// This is separate from [Frontend] to clearly separate which fields
+// can be manipulated and which are internally managed by [Writer].
+type FrontendParams struct {
+	// Frontend address and port
+	Address loadbalancer.L3n4Addr
+
+	// Service type (e.g. ClusterIP, NodePort, ...)
+	Type loadbalancer.SVCType
+
+	// Name of the associated service
+	ServiceName loadbalancer.ServiceName
 
 	// PortName if set will select only backends with matching
 	// port name.
 	PortName loadbalancer.FEPortName
 
-	// service associated with the frontend. If service is updated
-	// this pointer to the service will update as well and the
-	// frontend is marked for reconciliation.
-	//
-	// Private as it is managed by [Services] and does not need to
-	// be JSON serialized.
-	service *Service
+	// ServicePort is the associated "ClusterIP" port of this frontend.
+	// Same as [Address.L4Addr.Port] except when [Type] NodePort or
+	// LoadBalancer. This is used to match frontends with the [Ports] of
+	// [Service.ProxyRedirect].
+	ServicePort uint16
+}
 
-	// ID is the allocated numerical id for the frontend used in BPF
-	// maps to refer to this service.
-	ID loadbalancer.ID
+type Frontend struct {
+	FrontendParams
 
 	// Status is the reconciliation status for this frontend and
 	// reflects whether or not the frontend and the associated backends
 	// have been reconciled with the BPF maps.
+	// Managed by [Writer].
 	Status reconciler.Status
+
+	// Backends associated with the frontend.
+	Backends []BackendWithRevision
+
+	// nodePortAddrs are the IP addresses on which to serve NodePort and HostPort
+	// services. Not set if [Type] is not NodePort or HostPort. These are updated
+	// when the Table[NodeAddress] changes.
+	nodePortAddrs []netip.Addr
+
+	// service associated with the frontend. If service is updated
+	// this pointer to the service will update as well and the
+	// frontend is marked for reconciliation.
+	//
+	// Private as it is managed by [Writer] and does not need to
+	// be JSON serialized.
+	service *Service
+}
+
+type BackendWithRevision struct {
+	*Backend
+	Revision statedb.Revision
 }
 
 func (fe *Frontend) Service() *Service {
@@ -63,10 +93,12 @@ func (fe *Frontend) TableHeader() []string {
 	return []string{
 		"Address",
 		"Type",
-		"PortName",
 		"ServiceName",
-		"ID",
+		"PortName",
+		"Backends",
 		"Status",
+		"Since",
+		"Error",
 	}
 }
 
@@ -74,42 +106,62 @@ func (fe *Frontend) TableRow() []string {
 	return []string{
 		fe.Address.StringWithProtocol(),
 		string(fe.Type),
-		string(fe.PortName),
 		fe.ServiceName.String(),
-		strconv.FormatUint(uint64(fe.ID), 10),
-		fe.Status.String(),
+		string(fe.PortName),
+		showBackends(fe.Backends),
+		string(fe.Status.Kind),
+		duration.HumanDuration(time.Since(fe.Status.UpdatedAt)),
+		fe.Status.Error,
 	}
 }
 
-// l3n4AddrKey computes the StateDB key to use for L3n4Addr.
-func l3n4AddrKey(addr loadbalancer.L3n4Addr) index.Key {
-	return slices.Concat(
-		index.NetIPAddr(addr.AddrCluster.Addr()),
-		index.Uint16(addr.Port),
-		index.String(addr.Protocol),
-		index.Uint32(addr.AddrCluster.ClusterID()),
-		[]byte{addr.Scope},
-	)
+// showBackends returns the backends associated with a frontend in form
+// "1.2.3.4:80 (active), [2001::1]:443 (terminating)"
+// TODO: Skip showing the state?
+func showBackends(bes []BackendWithRevision) string {
+	var b strings.Builder
+	for i, be := range bes {
+		b.WriteString(be.L3n4Addr.String())
+		b.WriteString(" (")
+		state, err := be.State.String()
+		if err != nil {
+			state = err.Error()
+		}
+		b.WriteString(state)
+		b.WriteString(")")
+		if i != len(bes)-1 {
+			b.WriteString(", ")
+		}
+	}
+	return b.String()
 }
 
 var (
-	FrontendAddressIndex = statedb.Index[*Frontend, loadbalancer.L3n4Addr]{
+	frontendAddressIndex = statedb.Index[*Frontend, loadbalancer.L3n4Addr]{
 		Name: "frontends",
 		FromObject: func(fe *Frontend) index.KeySet {
-			return index.NewKeySet(l3n4AddrKey(fe.Address))
+			return index.NewKeySet(fe.Address.Bytes())
 		},
-		FromKey: l3n4AddrKey,
-		Unique:  true,
+		FromKey: func(l loadbalancer.L3n4Addr) index.Key {
+			return index.Key(l.Bytes())
+		},
+		FromString: loadbalancer.L3n4AddrFromString,
+		Unique:     true,
 	}
 
-	FrontendServiceIndex = statedb.Index[*Frontend, loadbalancer.ServiceName]{
+	FrontendByAddress = frontendAddressIndex.Query
+
+	frontendServiceIndex = statedb.Index[*Frontend, loadbalancer.ServiceName]{
 		Name: "service",
 		FromObject: func(fe *Frontend) index.KeySet {
 			return index.NewKeySet(index.Stringer(fe.ServiceName))
 		},
-		FromKey: index.Stringer[loadbalancer.ServiceName],
-		Unique:  false,
+		FromKey:    index.Stringer[loadbalancer.ServiceName],
+		FromString: index.FromString,
+		Unique:     false,
 	}
+
+	FrontendByServiceName = frontendServiceIndex.Query
 )
 
 const (
@@ -119,16 +171,11 @@ const (
 func NewFrontendsTable(db *statedb.DB) (statedb.RWTable[*Frontend], error) {
 	tbl, err := statedb.NewTable(
 		FrontendTableName,
-		FrontendAddressIndex,
-		FrontendServiceIndex,
+		frontendAddressIndex,
+		frontendServiceIndex,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return tbl, db.RegisterTable(tbl)
-}
-
-func GetBackendsForFrontend(txn statedb.ReadTxn, tbl statedb.Table[*Backend], fe *Frontend) statedb.Iterator[*Backend] {
-	// TODO: Here we would filter out backends based on their state and on frontend properties such as the PortName.
-	return tbl.List(txn, BackendServiceIndex.Query(fe.ServiceName))
 }

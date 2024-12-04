@@ -11,6 +11,7 @@ import (
 	cmmetrics "github.com/cilium/cilium/clustermesh-apiserver/metrics"
 	"github.com/cilium/cilium/clustermesh-apiserver/option"
 	"github.com/cilium/cilium/clustermesh-apiserver/syncstate"
+	"github.com/cilium/cilium/pkg/clustermesh/operator"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -28,6 +29,7 @@ var Cell = cell.Module(
 	"Cilium ClusterMesh",
 
 	cell.Config(option.DefaultLegacyClusterMeshConfig),
+	cell.Config(operator.MCSAPIConfig{}),
 
 	// We don't validate that the ClusterID is different from 0 (and the
 	// ClusterName is not the default one), because they are valid in
@@ -37,10 +39,7 @@ var Cell = cell.Module(
 	cell.Invoke(cmtypes.ClusterInfo.Validate),
 
 	pprof.Cell,
-	cell.Config(pprof.Config{
-		PprofAddress: option.PprofAddress,
-		PprofPort:    option.PprofPortClusterMesh,
-	}),
+	cell.Config(pprofConfig),
 	controller.Cell,
 
 	gops.Cell(defaults.GopsPortApiserver),
@@ -48,7 +47,7 @@ var Cell = cell.Module(
 	k8sClient.Cell,
 	cmk8s.ResourcesCell,
 
-	kvstore.Cell(kvstore.EtcdBackendName),
+	kvstore.Cell,
 	cell.Provide(func(ss syncstate.SyncState) *kvstore.ExtraOptions {
 		return &kvstore.ExtraOptions{
 			BootstrapComplete: ss.WaitChannel(),
@@ -78,3 +77,9 @@ var Cell = cell.Module(
 	cell.Invoke(registerHooks),
 	externalWorkloadsCell,
 )
+
+var pprofConfig = pprof.Config{
+	Pprof:        false,
+	PprofAddress: option.PprofAddress,
+	PprofPort:    option.PprofPortClusterMesh,
+}

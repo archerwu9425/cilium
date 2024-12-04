@@ -29,12 +29,13 @@ import (
 	fqdnproxy "github.com/cilium/cilium/pkg/fqdn/proxy"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/identity"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/labelsfilter"
-	ctmapgc "github.com/cilium/cilium/pkg/maps/ctmap/gc"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAgent "github.com/cilium/cilium/pkg/monitor/agent"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
@@ -58,7 +59,7 @@ type DaemonSuite struct {
 	oldPolicyEnabled string
 
 	// Owners interface mock
-	OnGetPolicyRepository  func() *policy.Repository
+	OnGetPolicyRepository  func() policy.PolicyRepository
 	OnGetNamedPorts        func() (npm types.NamedPortMultiMap)
 	OnQueueEndpointBuild   func(ctx context.Context, epID uint64) (func(), error)
 	OnGetCompilationLock   func() datapath.CompilationLock
@@ -127,7 +128,7 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 			},
 			func() *option.DaemonConfig { return option.Config },
 			func() cnicell.CNIConfigManager { return &fakecni.FakeCNIConfigManager{} },
-			func() ctmapgc.Enabler { return ctmapgc.NewFake() },
+			func() ctmap.GCRunner { return ctmap.NewFakeGCRunner() },
 			k8sSynced.RejectedCRDSyncPromise,
 		),
 		fakeDatapath.Cell,
@@ -151,12 +152,11 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 
 	ds.log = hivetest.Logger(tb)
 	err := ds.hive.Start(ds.log, ctx)
-	require.Nil(tb, err)
+	require.NoError(tb, err)
 
 	ds.d, err = daemonPromise.Await(ctx)
-	require.Nil(tb, err)
+	require.NoError(tb, err)
 
-	kvstore.Client().DeletePrefix(ctx, kvstore.OperationalPath)
 	kvstore.Client().DeletePrefix(ctx, kvstore.BaseKeyPrefix)
 
 	ds.d.policy.GetSelectorCache().SetLocalIdentityNotifier(testidentity.NewDummyIdentityNotifier())
@@ -171,7 +171,8 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 	for _, s := range []string{
 		string(models.EndpointStateReady),
 		string(models.EndpointStateWaitingDashForDashIdentity),
-		string(models.EndpointStateWaitingDashToDashRegenerate)} {
+		string(models.EndpointStateWaitingDashToDashRegenerate),
+	} {
 		metrics.EndpointStateCount.WithLabelValues(s).Set(0.0)
 	}
 
@@ -188,7 +189,7 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 		policy.SetPolicyEnabled(ds.oldPolicyEnabled)
 
 		err := ds.hive.Stop(ds.log, ctx)
-		require.Nil(tb, err)
+		require.NoError(tb, err)
 
 		ds.d.Close()
 	})
@@ -235,26 +236,12 @@ func setupDaemonEtcdSuite(tb testing.TB) *DaemonEtcdSuite {
 	}
 }
 
-type DaemonConsulSuite struct {
-	DaemonSuite
-}
-
-func setupDaemonConsulSuite(tb testing.TB) *DaemonConsulSuite {
-	testutils.IntegrationTest(tb)
-	kvstore.SetupDummy(tb, "consul")
-
-	ds := setupDaemonSuite(tb)
-	return &DaemonConsulSuite{
-		DaemonSuite: *ds,
-	}
-}
-
 func TestMinimumWorkerThreadsIsSet(t *testing.T) {
-	require.Equal(t, true, numWorkerThreads() >= 2)
-	require.Equal(t, true, numWorkerThreads() >= runtime.NumCPU())
+	require.GreaterOrEqual(t, numWorkerThreads(), 2)
+	require.GreaterOrEqual(t, numWorkerThreads(), runtime.NumCPU())
 }
 
-func (ds *DaemonSuite) GetPolicyRepository() *policy.Repository {
+func (ds *DaemonSuite) GetPolicyRepository() policy.PolicyRepository {
 	if ds.OnGetPolicyRepository != nil {
 		return ds.OnGetPolicyRepository()
 	}
@@ -297,16 +284,33 @@ func (ds *DaemonSuite) GetCIDRPrefixLengths() ([]int, []int) {
 	panic("GetCIDRPrefixLengths should not have been called")
 }
 
-func (ds *DaemonSuite) Datapath() datapath.Datapath {
-	return ds.d.datapath
+func (ds *DaemonSuite) Loader() datapath.Loader {
+	return ds.d.loader
+}
+
+func (ds *DaemonSuite) Orchestrator() datapath.Orchestrator {
+	return ds.d.orchestrator
+}
+
+func (ds *DaemonSuite) BandwidthManager() datapath.BandwidthManager {
+	return ds.d.bwManager
+}
+
+func (ds *DaemonSuite) IPTablesManager() datapath.IptablesManager {
+	return ds.d.iptablesManager
 }
 
 func (ds *DaemonSuite) GetDNSRules(epID uint16) restore.DNSRules {
 	return nil
 }
 
-func (ds *DaemonSuite) RemoveRestoredDNSRules(epID uint16) {
-}
+func (ds *DaemonSuite) RemoveRestoredDNSRules(epID uint16) {}
+
+func (ds *DaemonSuite) AddIdentity(id *identity.Identity) {}
+
+func (ds *DaemonSuite) RemoveIdentity(id *identity.Identity) {}
+
+func (ds *DaemonSuite) RemoveOldAddNewIdentity(old, new *identity.Identity) {}
 
 func TestMemoryMap(t *testing.T) {
 	pid := os.Getpid()

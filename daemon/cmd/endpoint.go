@@ -378,7 +378,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 	apiLabels := labels.NewLabelsFromModel(epTemplate.Labels)
 	epTemplate.Labels = nil
 
-	ep, err := endpoint.NewEndpointFromChangeModel(d.ctx, owner, d, d.ipcache, d.l7Proxy, d.identityAllocator, epTemplate)
+	ep, err := endpoint.NewEndpointFromChangeModel(d.ctx, owner, d, d.ipcache, d.l7Proxy, d.identityAllocator, d.ctMapGC, epTemplate)
 	if err != nil {
 		return invalidDataError(ep, fmt.Errorf("unable to parse endpoint parameters: %w", err))
 	}
@@ -458,6 +458,9 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 				err = errors.Join(err, err2)
 			} else {
 				pod = newPod
+				// Clear the error so the code can proceed below as we've
+				// succeeded here.
+				err = nil
 			}
 		}
 
@@ -690,7 +693,7 @@ func patchEndpointIDHandler(d *Daemon, params PatchEndpointIDParams) middleware.
 
 	// Validate the template. Assignment afterwards is atomic.
 	// Note: newEp's labels are ignored.
-	newEp, err2 := endpoint.NewEndpointFromChangeModel(d.ctx, d, d, d.ipcache, d.l7Proxy, d.identityAllocator, epTemplate)
+	newEp, err2 := endpoint.NewEndpointFromChangeModel(d.ctx, d, d, d.ipcache, d.l7Proxy, d.identityAllocator, d.ctMapGC, epTemplate)
 	if err2 != nil {
 		r.Error(err2, PutEndpointIDInvalidCode)
 		return api.Error(PutEndpointIDInvalidCode, err2)
@@ -750,19 +753,23 @@ func patchEndpointIDHandler(d *Daemon, params PatchEndpointIDParams) middleware.
 	return NewPatchEndpointIDOK()
 }
 
-func (d *Daemon) deleteEndpoint(ep *endpoint.Endpoint) int {
+func (d *Daemon) deleteEndpointRelease(ep *endpoint.Endpoint, noIPRelease bool) int {
 	// Cancel any ongoing endpoint creation
 	d.endpointCreations.CancelCreateRequest(ep)
 
 	scopedLog := log.WithField(logfields.EndpointID, ep.ID)
 	errs := d.deleteEndpointQuiet(ep, endpoint.DeleteConfig{
-		// If the IP is managed by an external IPAM, it does not need to be released
-		NoIPRelease: ep.DatapathConfiguration.ExternalIpam,
+		NoIPRelease: noIPRelease,
 	})
 	for _, err := range errs {
 		scopedLog.WithError(err).Warn("Ignoring error while deleting endpoint")
 	}
 	return len(errs)
+}
+
+func (d *Daemon) deleteEndpoint(ep *endpoint.Endpoint) int {
+	// If the IP is managed by an external IPAM, it does not need to be released
+	return d.deleteEndpointRelease(ep, ep.DatapathConfiguration.ExternalIpam)
 }
 
 // deleteEndpointQuiet sets the endpoint into disconnecting state and removes
@@ -1154,7 +1161,12 @@ func (d *Daemon) GetDNSRules(epID uint16) restore.DNSRules {
 		return nil
 	}
 
-	rules, err := proxy.DefaultDNSProxy.GetRules(epID)
+	// We get the latest consistent view on the DNS rules by getting handle to the latest
+	// coherent state of the selector cache
+	version := d.policy.GetSelectorCache().GetVersionHandle()
+	rules, err := proxy.DefaultDNSProxy.GetRules(version, epID)
+	version.Close()
+
 	if err != nil {
 		log.WithField(logfields.EndpointID, epID).WithError(err).Error("Could not get DNS rules")
 		return nil

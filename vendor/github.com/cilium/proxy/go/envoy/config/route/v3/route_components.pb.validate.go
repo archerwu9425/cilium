@@ -2690,6 +2690,35 @@ func (m *CorsPolicy) validate(all bool) error {
 		}
 	}
 
+	if all {
+		switch v := interface{}(m.GetForwardNotMatchingPreflights()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, CorsPolicyValidationError{
+					field:  "ForwardNotMatchingPreflights",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, CorsPolicyValidationError{
+					field:  "ForwardNotMatchingPreflights",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetForwardNotMatchingPreflights()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return CorsPolicyValidationError{
+				field:  "ForwardNotMatchingPreflights",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
 	switch v := m.EnabledSpecifier.(type) {
 	case *CorsPolicy_FilterEnabled:
 		if v == nil {
@@ -7333,6 +7362,8 @@ func (m *RouteAction_RequestMirrorPolicy) validate(all bool) error {
 			}
 		}
 	}
+
+	// no validation rules for DisableShadowHostSuffixAppend
 
 	if len(errors) > 0 {
 		return RouteAction_RequestMirrorPolicyMultiError(errors)

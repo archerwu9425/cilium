@@ -9,9 +9,9 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/spf13/pflag"
-	"github.com/vishvananda/netlink"
 
 	dpcfgdef "github.com/cilium/cilium/pkg/datapath/linux/config/defines"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/defaults"
 )
 
@@ -59,6 +59,15 @@ type newConfigIn struct {
 	Enablers []enabler `group:"request-enable-tunneling"`
 }
 
+var (
+	configDisabled = Config{
+		protocol:       Disabled,
+		port:           0,
+		deviceName:     "",
+		shouldAdaptMTU: false,
+	}
+)
+
 func newConfig(in newConfigIn) (Config, error) {
 	switch Protocol(in.Cfg.TunnelProtocol) {
 	case VXLAN, Geneve:
@@ -67,8 +76,10 @@ func newConfig(in newConfigIn) (Config, error) {
 	}
 
 	cfg := Config{
-		protocol: Protocol(in.Cfg.TunnelProtocol),
-		port:     in.Cfg.TunnelPort,
+		protocol:       Protocol(in.Cfg.TunnelProtocol),
+		port:           in.Cfg.TunnelPort,
+		deviceName:     "",
+		shouldAdaptMTU: false,
 	}
 
 	var enabled bool
@@ -79,14 +90,14 @@ func newConfig(in newConfigIn) (Config, error) {
 
 			for _, validator := range e.validators {
 				if err := validator(cfg.protocol); err != nil {
-					return Config{}, err
+					return configDisabled, err
 				}
 			}
 		}
 	}
 
 	if !enabled {
-		return Config{protocol: Disabled}, nil
+		return configDisabled, nil
 	}
 
 	switch cfg.protocol {
@@ -109,6 +120,7 @@ func newConfig(in newConfigIn) (Config, error) {
 
 // NewTestConfig returns a new TunnelConfig for testing purposes.
 func NewTestConfig(proto Protocol) Config {
+	//exhaustruct:ignore // Test code can underspecify the default config
 	cfg := Config{protocol: proto}
 
 	switch proto {
@@ -150,7 +162,7 @@ func (cfg Config) datapathConfigProvider() (dpcfgdef.NodeOut, dpcfgdef.NodeFnOut
 		defines["TUNNEL_PORT"] = fmt.Sprintf("%d", cfg.Port())
 
 		definesFn = func() (dpcfgdef.Map, error) {
-			tunnelDev, err := netlink.LinkByName(cfg.DeviceName())
+			tunnelDev, err := safenetlink.LinkByName(cfg.DeviceName())
 			if err != nil {
 				return nil, fmt.Errorf("failed to retrieve device info for %q: %w", cfg.DeviceName(), err)
 			}
@@ -218,4 +230,9 @@ type userCfg struct {
 func (def userCfg) Flags(flags *pflag.FlagSet) {
 	flags.String("tunnel-protocol", def.TunnelProtocol, "Encapsulation protocol to use for the overlay (\"vxlan\" or \"geneve\")")
 	flags.Uint16("tunnel-port", def.TunnelPort, fmt.Sprintf("Tunnel port (default %d for \"vxlan\" and %d for \"geneve\")", defaults.TunnelPortVXLAN, defaults.TunnelPortGeneve))
+}
+
+var defaultConfig = userCfg{
+	TunnelProtocol: defaults.TunnelProtocol,
+	TunnelPort:     0, // auto-detect based on the protocol.
 }

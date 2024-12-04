@@ -6,6 +6,7 @@ package ipcache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/netip"
 	"path"
@@ -165,6 +166,7 @@ type IPIdentityWatcher struct {
 	clusterID                  uint32
 	source                     source.Source
 	withSelfDeletionProtection bool
+	validators                 []ipIdentityValidator
 
 	started bool
 	synced  chan struct{}
@@ -198,12 +200,14 @@ func NewIPIdentityWatcher(
 	return &watcher
 }
 
+type ipIdentityValidator func(*identity.IPIdentityPair) error
 type IWOpt func(*iwOpts)
 
 type iwOpts struct {
 	clusterID              uint32
 	selfDeletionProtection bool
 	cachedPrefix           bool
+	validators             []ipIdentityValidator
 }
 
 // WithClusterID configures the ClusterID associated with the given watcher.
@@ -231,6 +235,33 @@ func WithCachedPrefix(cached bool) IWOpt {
 	}
 }
 
+// WithIdentityValidator registers a validation function to ensure that the
+// observed IPs are associated with an identity belonging to the expected range.
+func WithIdentityValidator(clusterID uint32) IWOpt {
+	return func(opts *iwOpts) {
+		min := identity.GetMinimalAllocationIdentity(clusterID)
+		max := identity.GetMaximumAllocationIdentity(clusterID)
+
+		validator := func(pair *identity.IPIdentityPair) error {
+			switch {
+			// The identity belongs to the expected range based on the Cluster ID.
+			case pair.ID >= min && pair.ID <= max:
+				return nil
+
+			// Allow all reserved IDs as well, including well-known and
+			// user-reserved identities, as they are not scoped by Cluster ID.
+			case pair.ID < identity.MinimalNumericIdentity:
+				return nil
+
+			default:
+				return fmt.Errorf("ID %d does not belong to the allocation range of cluster ID %d", pair.ID, clusterID)
+			}
+		}
+
+		opts.validators = append(opts.validators, validator)
+	}
+}
+
 // Watch starts the watcher and blocks waiting for events, until the context is
 // closed. When events are received from the kvstore, all IPIdentityMappingListener
 // are notified. It automatically emits deletion events for stale keys when appropriate
@@ -255,6 +286,7 @@ func (iw *IPIdentityWatcher) Watch(ctx context.Context, backend storepkg.WatchSt
 	iw.started = true
 	iw.clusterID = iwo.clusterID
 	iw.withSelfDeletionProtection = iwo.selfDeletionProtection
+	iw.validators = iwo.validators
 	iw.store.Watch(ctx, backend, prefix)
 }
 
@@ -298,6 +330,14 @@ func (iw *IPIdentityWatcher) OnUpdate(k storepkg.Key) {
 	}
 
 	iw.log.WithField(logfields.IPAddr, ip).Debug("Observed upsertion event")
+
+	for _, validator := range iw.validators {
+		if err := validator(ipIDPair); err != nil {
+			log.WithError(err).WithField(logfields.IPAddr, ip).
+				Warning("Skipping invalid upsertion event")
+			return
+		}
+	}
 
 	var k8sMeta *K8sMetadata
 	if ipIDPair.K8sNamespace != "" || ipIDPair.K8sPodName != "" || len(ipIDPair.NamedPorts) > 0 {
@@ -397,10 +437,6 @@ func (iw *IPIdentityWatcher) selfDeletionProtection(ip string) bool {
 	return false
 }
 
-func (iw *IPIdentityWatcher) waitForInitialSync() {
-	<-iw.synced
-}
-
 var (
 	watcher     *IPIdentityWatcher
 	initialized = make(chan struct{})
@@ -420,7 +456,17 @@ func (ipc *IPCache) InitIPIdentityWatcher(ctx context.Context, factory storepkg.
 }
 
 // WaitForKVStoreSync waits until the ipcache has been synchronized from the kvstore
-func WaitForKVStoreSync() {
-	<-initialized
-	watcher.waitForInitialSync()
+func WaitForKVStoreSync(ctx context.Context) error {
+	select {
+	case <-initialized:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case <-watcher.synced:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

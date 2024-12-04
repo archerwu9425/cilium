@@ -93,6 +93,11 @@ func Test_gatewayClassReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, err, "Error reconciling gateway class")
 		require.Equal(t, ctrl.Result{}, result, "Result should be empty")
 		gwconformance.GWCMustHaveAcceptedConditionTrue(t, c, gwconformanceconfig.DefaultTimeoutConfig(), "dummy-gw-class")
+
+		gwc := &gatewayv1.GatewayClass{}
+		err = c.Get(context.Background(), types.NamespacedName{Name: "dummy-gw-class"}, gwc)
+		require.NoError(t, err, "Error getting gateway class")
+		require.NotZero(t, gwc.Status.SupportedFeatures)
 	})
 
 	t.Run("non-matching controller name", func(t *testing.T) {
@@ -109,6 +114,6 @@ func Test_gatewayClassReconciler_Reconcile(t *testing.T) {
 		err = c.Get(context.Background(), types.NamespacedName{Name: "non-matching-gw-class"}, gwc)
 
 		require.NoError(t, err, "Error getting gateway class")
-		require.Len(t, gwc.Status.Conditions, 0, "Gateway class should not have any conditions")
+		require.Empty(t, gwc.Status.Conditions, "Gateway class should not have any conditions")
 	})
 }

@@ -561,7 +561,7 @@ func TestPeerManager(t *testing.T) {
 			},
 			want: want{
 				log: []string{
-					`level=warning msg="Failed to create peer client for peers synchronization; will try again after the timeout has expired" error="I'm on PTO" target="unix:///var/run/cilium/hubble.sock"`,
+					`level=info msg="Failed to create peer client for peers synchronization; will try again after the timeout has expired" error="I'm on PTO" target="unix:///var/run/cilium/hubble.sock"`,
 				},
 			},
 		}, {
@@ -613,7 +613,7 @@ func TestPeerManager(t *testing.T) {
 					},
 				},
 				log: []string{
-					`level=warning msg="Failed to create gRPC client" address="192.0.1.1:4244" error="Don't feel like workin' today" hubble-tls=false next-try-in=10s peer=unreachable`,
+					`level=warning msg="Failed to create gRPC client" address="192.0.1.1:4244" error="Don't feel like workin' today" hubble-tls=false next-try-in=1s peer=unreachable`,
 				},
 			},
 		}, {
@@ -633,7 +633,7 @@ func TestPeerManager(t *testing.T) {
 			},
 			want: want{
 				log: []string{
-					`level=warning msg="Failed to create peer notify client for peers change notification; will try again after the timeout has expired" connection timeout=30s error="Don't feel like workin' today"`,
+					`level=info msg="Failed to create peer notify client for peers change notification; will try again after the timeout has expired" connection timeout=30s error="Don't feel like workin' today"`,
 				},
 			},
 		}, {
@@ -656,7 +656,7 @@ func TestPeerManager(t *testing.T) {
 				},
 			},
 			want: want{
-				log: []string{`level=warning msg="Error while receiving peer change notification; will try again after the timeout has expired" connection timeout=30s error="Nope, ain't doin' nothin'`},
+				log: []string{`level=info msg="Error while receiving peer change notification; will try again after the timeout has expired" connection timeout=30s error="Nope, ain't doin' nothin'`},
 			},
 		},
 	}

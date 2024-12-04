@@ -25,7 +25,7 @@ import (
 
 func getEPTemplate(t *testing.T, d *Daemon) *models.EndpointChangeRequest {
 	ip4, ip6, err := d.ipam.AllocateNext("", "test", ipam.PoolDefault())
-	require.Equal(t, nil, err)
+	require.NoError(t, err)
 	require.NotNil(t, ip4)
 	require.NotNil(t, ip6)
 
@@ -43,11 +43,6 @@ func getEPTemplate(t *testing.T, d *Daemon) *models.EndpointChangeRequest {
 	}
 }
 
-func TestEndpointAddReservedLabelConsul(t *testing.T) {
-	ds := setupDaemonConsulSuite(t)
-	ds.testEndpointAddReservedLabel(t)
-}
-
 func TestEndpointAddReservedLabelEtcd(t *testing.T) {
 	ds := setupDaemonEtcdSuite(t)
 	ds.testEndpointAddReservedLabel(t)
@@ -59,7 +54,7 @@ func (ds *DaemonSuite) testEndpointAddReservedLabel(t *testing.T) {
 	epTemplate := getEPTemplate(t, ds.d)
 	epTemplate.Labels = []string{"reserved:world"}
 	_, code, err := ds.d.createEndpoint(context.TODO(), ds, epTemplate)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	require.Equal(t, apiEndpoint.PutEndpointIDInvalidCode, code)
 
 	// Endpoint was created with invalid data; should transition from
@@ -80,11 +75,6 @@ func (ds *DaemonSuite) testEndpointAddReservedLabel(t *testing.T) {
 	assertOnMetric(t, string(models.EndpointStateInvalid), 0)
 }
 
-func TestEndpointAddInvalidLabelConsul(t *testing.T) {
-	ds := setupDaemonConsulSuite(t)
-	ds.testEndpointAddInvalidLabel(t)
-}
-
 func TestEndpointAddInvalidLabelEtcd(t *testing.T) {
 	ds := setupDaemonEtcdSuite(t)
 	ds.testEndpointAddInvalidLabel(t)
@@ -96,18 +86,13 @@ func (ds *DaemonSuite) testEndpointAddInvalidLabel(t *testing.T) {
 	epTemplate := getEPTemplate(t, ds.d)
 	epTemplate.Labels = []string{"reserved:foo"}
 	_, code, err := ds.d.createEndpoint(context.TODO(), ds, epTemplate)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	require.Equal(t, apiEndpoint.PutEndpointIDInvalidCode, code)
 
 	// Endpoint was created with invalid data; should transition from
 	// WaitingForIdentity -> Invalid.
 	assertOnMetric(t, string(models.EndpointStateWaitingDashForDashIdentity), 0)
 	assertOnMetric(t, string(models.EndpointStateInvalid), 0)
-}
-
-func TestEndpointAddNoLabelsConsul(t *testing.T) {
-	ds := setupDaemonConsulSuite(t)
-	ds.testEndpointAddNoLabels(t)
 }
 
 func TestEndpointAddNoLabelsEtcd(t *testing.T) {
@@ -125,16 +110,16 @@ func (ds *DaemonSuite) testEndpointAddNoLabels(t *testing.T) {
 	// Create the endpoint without any labels.
 	epTemplate := getEPTemplate(t, ds.d)
 	_, _, err := ds.d.createEndpoint(context.TODO(), ds, epTemplate)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	expectedLabels := labels.Labels{
 		labels.IDNameInit: labels.NewLabel(labels.IDNameInit, "", labels.LabelSourceReserved),
 	}
 	// Check that the endpoint has the reserved:init label.
 	v4ip, err := netip.ParseAddr(epTemplate.Addressing.IPV4)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	ep, err := ds.d.endpointManager.Lookup(endpointid.NewIPPrefixID(v4ip))
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.EqualValues(t, expectedLabels, ep.OpLabels.IdentityLabels())
 
 	secID := ep.WaitForIdentity(3 * time.Second)
@@ -151,13 +136,8 @@ func (ds *DaemonSuite) testEndpointAddNoLabels(t *testing.T) {
 func (ds *DaemonSuite) testUpdateSecLabels(t *testing.T) {
 	lbls := labels.NewLabelsFromModel([]string{"reserved:world"})
 	code, err := ds.d.modifyEndpointIdentityLabelsFromAPI("1", lbls, nil)
-	require.NotNil(t, err)
+	require.Error(t, err)
 	require.Equal(t, apiEndpoint.PatchEndpointIDLabelsUpdateFailedCode, code)
-}
-
-func TestUpdateSecLabelsConsul(t *testing.T) {
-	ds := setupDaemonConsulSuite(t)
-	ds.testUpdateSecLabels(t)
 }
 
 func TestUpdateSecLabelsEtcd(t *testing.T) {
@@ -175,11 +155,6 @@ func (ds *DaemonSuite) testUpdateLabelsFailed(t *testing.T) {
 	require.ErrorContains(t, err, "request cancelled while resolving identity")
 
 	assertOnMetric(t, string(models.EndpointStateReady), 0)
-}
-
-func TestUpdateLabelsFailedConsul(t *testing.T) {
-	ds := setupDaemonConsulSuite(t)
-	ds.testUpdateLabelsFailed(t)
 }
 
 func TestUpdateLabelsFailedEtcd(t *testing.T) {

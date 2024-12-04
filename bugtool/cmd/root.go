@@ -104,7 +104,7 @@ var (
 func init() {
 	BugtoolRootCmd.Flags().BoolVar(&archive, "archive", true, "Create archive when false skips deletion of the output directory")
 	BugtoolRootCmd.Flags().BoolVar(&getPProf, "get-pprof", false, "When set, only gets the pprof traces from the cilium-agent binary")
-	BugtoolRootCmd.Flags().IntVar(&pprofDebug, "pprof-debug", 1, "Debug pprof args")
+	BugtoolRootCmd.Flags().IntVar(&pprofDebug, "pprof-debug", 0, "Debug pprof args")
 	BugtoolRootCmd.Flags().BoolVar(&envoyDump, "envoy-dump", true, "When set, dump envoy configuration from unix socket")
 	BugtoolRootCmd.Flags().BoolVar(&envoyMetrics, "envoy-metrics", true, "When set, dump envoy prometheus metrics from unix socket")
 	BugtoolRootCmd.Flags().IntVar(&pprofPort,
@@ -117,17 +117,21 @@ func init() {
 	BugtoolRootCmd.Flags().IntVar(&traceSeconds, "pprof-trace-seconds", 180, "Amount of seconds used for pprof CPU traces")
 	BugtoolRootCmd.Flags().StringVarP(&archiveType, "archiveType", "o", "tar", "Archive type: tar | gz")
 	BugtoolRootCmd.Flags().BoolVar(&k8s, "k8s-mode", false, "Require Kubernetes pods to be found or fail")
+	BugtoolRootCmd.Flags().MarkDeprecated("k8s-mode", "This option is deprecated, and will be removed in v1.18")
 	BugtoolRootCmd.Flags().BoolVar(&dryRunMode, "dry-run", false, "Create configuration file of all commands that would have been executed")
 	BugtoolRootCmd.Flags().StringVarP(&dumpPath, "tmp", "t", defaultDumpPath, "Path to store extracted files. Use '-' to send to stdout.")
 	BugtoolRootCmd.Flags().StringVarP(&host, "host", "H", "", "URI to server-side API")
 	BugtoolRootCmd.Flags().StringVarP(&k8sNamespace, "k8s-namespace", "", "kube-system", "Kubernetes namespace for Cilium pod")
+	BugtoolRootCmd.Flags().MarkDeprecated("k8s-namespace", "This option is deprecated, and will be removed in v1.18")
 	BugtoolRootCmd.Flags().StringVarP(&k8sLabel, "k8s-label", "", "k8s-app=cilium", "Kubernetes label for Cilium pod")
+	BugtoolRootCmd.Flags().MarkDeprecated("k8s-label", "This option is deprecated, and will be removed in v1.18")
 	BugtoolRootCmd.Flags().DurationVarP(&execTimeout, "exec-timeout", "", 30*time.Second, "The default timeout for any cmd execution in seconds")
 	BugtoolRootCmd.Flags().StringVarP(&configPath, "config", "", "./.cilium-bugtool.config", "Configuration to decide what should be run")
 	BugtoolRootCmd.Flags().BoolVar(&enableMarkdown, "enable-markdown", false, "Dump output of commands in markdown format")
 	BugtoolRootCmd.Flags().StringVarP(&archivePrefix, "archive-prefix", "", "", "String to prefix to name of archive if created (e.g., with cilium pod-name)")
 	BugtoolRootCmd.Flags().IntVar(&parallelWorkers, "parallel-workers", 0, "Maximum number of parallel worker tasks, use 0 for number of CPUs")
 	BugtoolRootCmd.Flags().StringVarP(&ciliumAgentContainerName, "cilium-agent-container-name", "", "cilium-agent", "Name of the Cilium Agent main container (when k8s-mode is true)")
+	BugtoolRootCmd.Flags().MarkDeprecated("cilium-agent-container-name", "This option is deprecated, and will be removed in v1.18")
 	BugtoolRootCmd.Flags().BoolVar(&excludeObjectFiles, "exclude-object-files", false, "Exclude per-endpoint object files. Template object files will be kept")
 	BugtoolRootCmd.Flags().BoolVar(&hubbleMetrics, "hubble-metrics", true, "When set, hubble prometheus metrics")
 	BugtoolRootCmd.Flags().IntVar(&hubbleMetricsPort, "hubble-metrics-port", 9965, "Port to query for hubble metrics")
@@ -176,9 +180,7 @@ func removeIfEmpty(dir string) {
 
 func isValidArchiveType(archiveType string) bool {
 	switch archiveType {
-	case
-		"tar",
-		"gz":
+	case "tar", "gz":
 		return true
 	}
 	return false
@@ -256,6 +258,17 @@ func runTool() {
 		if envoyDump {
 			if err := dumpEnvoy(cmdDir, "http://admin/config_dump?include_eds", "envoy-config.json", envoySecretMask); err != nil {
 				fmt.Fprintf(os.Stderr, "Unable to dump envoy config: %s\n", err)
+			}
+			if err := dumpEnvoy(cmdDir, "http://admin/listeners", "envoy-listeners.txt", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy listeners: %s\n", err)
+			}
+
+			if err := dumpEnvoy(cmdDir, "http://admin/clusters", "envoy-clusters.txt", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy clusters: %s\n", err)
+			}
+
+			if err := dumpEnvoy(cmdDir, "http://admin/server_info", "envoy-server-info.json", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy server info: %s\n", err)
 			}
 		}
 
@@ -439,7 +452,14 @@ func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool
 	// Clean up the filename
 	name := strings.Replace(prompt, "/", " ", -1)
 	name = strings.Replace(name, " ", "-", -1)
-	f, err := os.Create(filepath.Join(cmdDir, name+".md"))
+	suffix := ".md"
+	if strings.HasSuffix(name, "html") {
+		// If the command we run ends in 'html' (such as 'metrics/html'), write out the
+		// output as a HTML file.
+		suffix = ".html"
+		enableMarkdown = false
+	}
+	f, err := os.Create(filepath.Join(cmdDir, name+suffix))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not create file %s\n", err)
 		return

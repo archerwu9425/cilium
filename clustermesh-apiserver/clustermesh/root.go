@@ -19,6 +19,8 @@ import (
 	cmk8s "github.com/cilium/cilium/clustermesh-apiserver/clustermesh/k8s"
 	"github.com/cilium/cilium/clustermesh-apiserver/syncstate"
 	operatorWatchers "github.com/cilium/cilium/operator/watchers"
+	"github.com/cilium/cilium/pkg/clustermesh/mcsapi"
+	"github.com/cilium/cilium/pkg/clustermesh/operator"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	cmutils "github.com/cilium/cilium/pkg/clustermesh/utils"
 	"github.com/cilium/cilium/pkg/hive"
@@ -58,10 +60,8 @@ func NewCmd(h *hive.Hive) *cobra.Command {
 		PreRun: func(cmd *cobra.Command, args []string) {
 			// Overwrite the metrics namespace with the one specific for the ClusterMesh API Server
 			metrics.Namespace = metrics.CiliumClusterMeshAPIServerNamespace
+			option.Config.SetupLogging(h.Viper(), "clustermesh-apiserver")
 			option.Config.Populate(h.Viper())
-			if option.Config.Debug {
-				log.Logger.SetLevel(logrus.DebugLevel)
-			}
 			option.LogRegisteredOptions(h.Viper(), log)
 			log.Infof("Cilium ClusterMesh %s", version.Version)
 		},
@@ -76,12 +76,15 @@ type parameters struct {
 	cell.In
 
 	ExternalWorkloadsConfig
+	CfgMCSAPI      operator.MCSAPIConfig
 	ClusterInfo    cmtypes.ClusterInfo
 	Clientset      k8sClient.Clientset
 	Resources      cmk8s.Resources
 	BackendPromise promise.Promise[kvstore.BackendOperations]
 	StoreFactory   store.Factory
 	SyncState      syncstate.SyncState
+
+	Logger *slog.Logger
 }
 
 func registerHooks(lc cell.Lifecycle, params parameters) error {
@@ -96,7 +99,7 @@ func registerHooks(lc cell.Lifecycle, params parameters) error {
 				return err
 			}
 
-			startServer(ctx, params.ClusterInfo, params.EnableExternalWorkloads, params.Clientset, backend, params.Resources, params.StoreFactory, params.SyncState)
+			startServer(ctx, params.ClusterInfo, params.EnableExternalWorkloads, params.Clientset, backend, params.Resources, params.StoreFactory, params.SyncState, params.CfgMCSAPI.ClusterMeshEnableMCSAPI, params.Logger)
 			return nil
 		},
 	})
@@ -105,7 +108,6 @@ func registerHooks(lc cell.Lifecycle, params parameters) error {
 
 type identitySynchronizer struct {
 	store        store.SyncStore
-	encoder      func([]byte) string
 	syncCallback func(context.Context)
 }
 
@@ -115,7 +117,7 @@ func newIdentitySynchronizer(ctx context.Context, cinfo cmtypes.ClusterInfo, bac
 		store.WSSWithSyncedKeyOverride(identityCache.IdentitiesPath))
 	go identitiesStore.Run(ctx)
 
-	return &identitySynchronizer{store: identitiesStore, encoder: backend.Encode, syncCallback: syncCallback}
+	return &identitySynchronizer{store: identitiesStore, syncCallback: syncCallback}
 }
 
 func parseLabelArrayFromMap(base map[string]string) labels.LabelArray {
@@ -144,7 +146,7 @@ func (is *identitySynchronizer) upsert(ctx context.Context, _ resource.Key, obj 
 	}
 
 	scopedLog.Info("Upserting identity in etcd")
-	kv := store.NewKVPair(identity.Name, is.encoder(labels))
+	kv := store.NewKVPair(identity.Name, string(labels))
 	if err := is.store.UpsertKey(ctx, kv); err != nil {
 		// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
 		log.WithError(err).Warning("Unable to upsert identity in etcd")
@@ -351,6 +353,8 @@ func startServer(
 	resources cmk8s.Resources,
 	factory store.Factory,
 	syncState syncstate.SyncState,
+	clusterMeshEnableMCSAPI bool,
+	logger *slog.Logger,
 ) {
 	log.WithFields(logrus.Fields{
 		"cluster-name": cinfo.Name,
@@ -360,8 +364,9 @@ func startServer(
 	config := cmtypes.CiliumClusterConfig{
 		ID: cinfo.ID,
 		Capabilities: cmtypes.CiliumClusterConfigCapabilities{
-			SyncedCanaries:       true,
-			MaxConnectedClusters: cinfo.MaxConnectedClusters,
+			SyncedCanaries:        true,
+			MaxConnectedClusters:  cinfo.MaxConnectedClusters,
+			ServiceExportsEnabled: &clusterMeshEnableMCSAPI,
 		},
 	}
 
@@ -383,6 +388,16 @@ func startServer(
 		SharedOnly:   !allServices,
 		StoreFactory: factory,
 		SyncCallback: syncState.WaitForResource(),
+	}, logger)
+	go mcsapi.StartSynchronizingServiceExports(ctx, mcsapi.ServiceExportSyncParameters{
+		ClusterName:             cinfo.Name,
+		ClusterMeshEnableMCSAPI: clusterMeshEnableMCSAPI,
+		Clientset:               clientset,
+		ServiceExports:          resources.ServiceExports,
+		Services:                resources.Services,
+		Backend:                 backend,
+		StoreFactory:            factory,
+		SyncCallback:            syncState.WaitForResource(),
 	})
 	syncState.Stop()
 

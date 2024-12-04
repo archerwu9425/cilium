@@ -17,15 +17,15 @@ import (
 type Loader interface {
 	CallsMapPath(id uint16) string
 	CustomCallsMapPath(id uint16) string
-	ReloadDatapath(ctx context.Context, ep Endpoint, stats *metrics.SpanStat) (string, error)
-	ReinitializeXDP(ctx context.Context, extraCArgs []string) error
-	EndpointHash(cfg EndpointConfiguration) (string, error)
 	Unload(ep Endpoint)
-	Reinitialize(ctx context.Context, cfg LocalNodeConfiguration, tunnelConfig tunnel.Config, iptMgr IptablesManager, p Proxy) error
 	HostDatapathInitialized() <-chan struct{}
-	DetachXDP(iface string, bpffsBase, progName string) error
 
-	WriteEndpointConfig(w io.Writer, cfg EndpointConfiguration) error
+	ReloadDatapath(ctx context.Context, ep Endpoint, cfg *LocalNodeConfiguration, stats *metrics.SpanStat) (string, error)
+	ReinitializeXDP(ctx context.Context, cfg *LocalNodeConfiguration, extraCArgs []string) error
+	EndpointHash(cfg EndpointConfiguration, lnCfg *LocalNodeConfiguration) (string, error)
+	ReinitializeHostDev(ctx context.Context, mtu int) error
+	Reinitialize(ctx context.Context, cfg *LocalNodeConfiguration, tunnelConfig tunnel.Config, iptMgr IptablesManager, p Proxy) error
+	WriteEndpointConfig(w io.Writer, cfg EndpointConfiguration, lnCfg *LocalNodeConfiguration) error
 }
 
 // PreFilter an interface for an XDP pre-filter.
@@ -40,7 +40,7 @@ type PreFilter interface {
 // Proxy is any type which installs rules related to redirecting traffic to
 // a proxy.
 type Proxy interface {
-	ReinstallRoutingRules() error
+	ReinstallRoutingRules(mtu int) error
 }
 
 // IptablesManager manages iptables rules.

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -30,11 +29,9 @@ import (
 	"github.com/cilium/cilium/pkg/hive/health"
 	"github.com/cilium/cilium/pkg/hive/health/types"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/ipcache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
-	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -243,7 +240,7 @@ func TestNodeLifecycle(t *testing.T) {
 	dp.EnableNodeDeleteEvent = true
 	ipcacheMock := newIPcacheMock()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	mngr.Subscribe(dp)
 	require.NoError(t, err)
 
@@ -318,7 +315,7 @@ func TestMultipleSources(t *testing.T) {
 	dp.EnableNodeDeleteEvent = true
 	ipcacheMock := newIPcacheMock()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -401,7 +398,7 @@ func BenchmarkUpdateAndDeleteCycle(b *testing.B) {
 	ipcacheMock := newIPcacheMock()
 	dp := fakeTypes.NewNodeHandler()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(b, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -425,7 +422,7 @@ func TestClusterSizeDependantInterval(t *testing.T) {
 	ipcacheMock := newIPcacheMock()
 	dp := fakeTypes.NewNodeHandler()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -450,7 +447,7 @@ func TestBackgroundSync(t *testing.T) {
 	signalNodeHandler.EnableNodeValidateImplementationEvent = true
 	ipcacheMock := newIPcacheMock()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	mngr.Subscribe(signalNodeHandler)
 	require.NoError(t, err)
 	defer mngr.Stop(context.TODO())
@@ -462,8 +459,6 @@ func TestBackgroundSync(t *testing.T) {
 
 	go func() {
 		nodeValidationsReceived := 0
-		timer, timerDone := inctimer.New()
-		defer timerDone()
 		for {
 			select {
 			case <-signalNodeHandler.NodeValidateImplementationEvent:
@@ -472,7 +467,7 @@ func TestBackgroundSync(t *testing.T) {
 					allNodeValidateCallsReceived.Done()
 					return
 				}
-			case <-timer.After(time.Second * 1):
+			case <-time.After(1 * time.Second):
 				t.Errorf("Timeout while waiting for NodeValidateImplementation() to be called")
 				allNodeValidateCallsReceived.Done()
 				return
@@ -499,7 +494,7 @@ func TestIpcache(t *testing.T) {
 	ipcacheMock := newIPcacheMock()
 	dp := newSignalNodeHandler()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -576,7 +571,7 @@ func TestIpcacheHealthIP(t *testing.T) {
 	ipcacheMock := newIPcacheMock()
 	dp := newSignalNodeHandler()
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -656,9 +651,8 @@ func TestNodeEncryption(t *testing.T) {
 	dp := newSignalNodeHandler()
 	h, _ := cell.NewSimpleHealth()
 	mngr, err := New(&option.DaemonConfig{
-		ConfigPatchMutex: new(lock.RWMutex),
-		EncryptNode:      true,
-		EnableIPSec:      true,
+		EncryptNode: true,
+		EnableIPSec: true,
 	}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
@@ -752,7 +746,7 @@ func TestNode(t *testing.T) {
 	dp.EnableNodeUpdateEvent = true
 	dp.EnableNodeDeleteEvent = true
 	h, _ := cell.NewSimpleHealth()
-	mngr, err := New(&option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
+	mngr, err := New(&option.DaemonConfig{}, ipcacheMock, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
 	defer mngr.Stop(context.TODO())
@@ -859,50 +853,44 @@ func TestNodeManagerEmitStatus(t *testing.T) {
 		// By default this is a buffered channel, by making it a non-buffered
 		// channel we can sync up iterations of background sync.
 		nh1.NodeValidateImplementationEvent = make(chan nodeTypes.Node)
-		nh1.NodeValidateImplementationEventError = fmt.Errorf("test error")
 		m.nodeHandlers[nh1] = struct{}{}
 
-		done := make(chan struct{})
-		reattempt := make(chan struct{})
-		checkStatus := func(old statedb.Revision) (types.Status, <-chan struct{}, statedb.Revision) {
-			tx := db.ReadTxn()
+		// Start the manager
+		assert.NoError(m.Start(context.Background()))
 
+		checkStatus := func() (types.Status, <-chan struct{}) {
 			id := types.Identifier{
 				Module:    cell.FullModuleID{"node_manager"},
 				Component: []string{"background-sync"},
 			}
-			for {
-				ss, cur, watch, _ := statusTable.GetWatch(tx, health.PrimaryIndex.Query(id.HealthID()))
-				if cur != old {
-					return ss, watch, cur
-				}
-				<-watch
-			}
+			ss, _, watch, _ := statusTable.GetWatch(db.ReadTxn(), health.PrimaryIndex.Query(id.HealthID()))
+			return ss, watch
 		}
-		go func() {
-			status, watch, rev := checkStatus(99)
-			assert.Equal(types.Level(""), status.Level)
-			<-watch
-			status, watch, rev = checkStatus(rev)
-			assert.Equal(types.LevelDegraded, string(status.Level))
-			close(reattempt)
-			<-watch
-			status, _, _ = checkStatus(rev)
-			assert.Equal(types.LevelOK, string(status.Level))
-		}()
-		go func() {
-			<-nh1.NodeValidateImplementationEvent
-			<-reattempt
-			nh1.NodeValidateImplementationEventError = nil
-			<-nh1.NodeValidateImplementationEvent
-			close(done)
-		}()
-		// Start the manager
-		assert.NoError(m.Start(context.Background()))
-		<-done
+
+		// Expecting initial empty health status before initial background sync,
+		// which is blocked by us not reading on `nh1.NodeValidateImplementationEvent`
+		status, watch := checkStatus()
+		assert.Equal(types.Level(""), status.Level)
+
+		// Unblock background sync by reading event. After this we expect the
+		// status to switch to "Degraded", due to the test error set below
+		nh1.NodeValidateImplementationEventError = fmt.Errorf("test error")
+		<-nh1.NodeValidateImplementationEvent
+		<-watch
+		status, watch = checkStatus()
+		assert.Equal(types.LevelDegraded, string(status.Level))
+
+		// Stop returning an error and unblock background sync by reading event. After
+		// this we expect the status to switch to "OK"
+		nh1.NodeValidateImplementationEventError = nil
+		<-nh1.NodeValidateImplementationEvent
+		<-watch
+		status, _ = checkStatus()
+		assert.Equal(types.LevelOK, string(status.Level))
 	}
+
 	ipcacheMock := newIPcacheMock()
-	config := &option.DaemonConfig{ConfigPatchMutex: new(lock.RWMutex)}
+	config := &option.DaemonConfig{}
 	err := hive.New(
 		cell.Provide(func() testParams {
 			return testParams{
@@ -954,8 +942,7 @@ func TestNodeWithSameInternalIP(t *testing.T) {
 	dp.EnableNodeDeleteEvent = true
 	h, _ := cell.NewSimpleHealth()
 	mngr, err := New(&option.DaemonConfig{
-		ConfigPatchMutex: new(lock.RWMutex),
-		LocalRouterIPv4:  "169.254.4.6",
+		LocalRouterIPv4: "169.254.4.6",
 	}, ipcache, newIPSetMock(), nil, NewNodeMetrics(), h)
 	require.NoError(t, err)
 	mngr.Subscribe(dp)
@@ -1054,7 +1041,6 @@ func TestNodeIpset(t *testing.T) {
 	filter := func(no *nodeTypes.Node) bool { return no.Name != "node1" }
 	h, _ := cell.NewSimpleHealth()
 	mngr, err := New(&option.DaemonConfig{
-		ConfigPatchMutex:     new(lock.RWMutex),
 		RoutingMode:          option.RoutingModeNative,
 		EnableIPv4Masquerade: true,
 	}, newIPcacheMock(), newIPSetMock(), filter, NewNodeMetrics(), h)
@@ -1199,8 +1185,7 @@ func TestNodesStartupPruning(t *testing.T) {
 	}}
 
 	// Create a nodes.json file from the above two nodes, simulating a previous instance of the agent.
-	tmp, err := os.MkdirTemp("", "nodes")
-	require.NoError(t, err)
+	tmp := t.TempDir()
 	path := filepath.Join(tmp, nodesFilename)
 	nf, err := os.Create(path)
 	require.NoError(t, err)
@@ -1216,14 +1201,9 @@ func TestNodesStartupPruning(t *testing.T) {
 	checkNodeFileMatches := func(path string, node nodeTypes.Node) {
 		// Wait until the file exists. The node deletion triggers the write, hence
 		// this shouldn't take long.
-		for range 10 {
-			_, err := os.Stat(path)
-			if err == nil {
-				break
-			}
-			require.ErrorIs(t, err, fs.ErrNotExist)
-			time.Sleep(time.Millisecond)
-		}
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.FileExists(c, path)
+		}, time.Second, 10*time.Millisecond)
 		nwf, err := os.Open(path)
 		require.NoError(t, err)
 		t.Cleanup(func() {

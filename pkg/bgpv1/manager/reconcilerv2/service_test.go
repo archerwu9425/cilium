@@ -5,7 +5,9 @@ package reconcilerv2
 
 import (
 	"context"
+	"maps"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -27,46 +29,26 @@ import (
 )
 
 var (
-	serviceIPPoolTestLogger = logrus.WithField("unit_test", "reconcilerv2_service")
+	serviceReconcilerTestLogger = logrus.WithField("unit_test", "reconcilerv2_service")
 )
 
 var (
 	redSvcKey           = resource.Key{Name: "red-svc", Namespace: "non-default"}
-	redLBPoolKey        = resource.Key{Name: "red-lb-pool", Namespace: "non-default"}
+	redSvc2Key          = resource.Key{Name: "red-svc2", Namespace: "non-default"}
 	redSvcSelector      = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "red"}}
 	mismatchSvcSelector = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "blue"}}
 	ingressV4           = "192.168.0.1"
 	ingressV4Prefix     = "192.168.0.1/32"
-	ingressV4PoolPrefix = "192.168.0.0/24"
 	externalV4          = "192.168.0.2"
 	externalV4Prefix    = "192.168.0.2/32"
 	clusterV4           = "192.168.0.3"
 	clusterV4Prefix     = "192.168.0.3/32"
 	ingressV6           = "2001:db8::1"
 	ingressV6Prefix     = "2001:db8::1/128"
-	ingressV6PoolPrefix = "2001:db8::/64"
 	externalV6          = "2001:db8::2"
 	externalV6Prefix    = "2001:db8::2/128"
 	clusterV6           = "2001:db8::3"
 	clusterV6Prefix     = "2001:db8::3/128"
-
-	redLBPool = &v2alpha1.CiliumLoadBalancerIPPool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "red-lb-pool",
-			Namespace: "non-default",
-			Labels:    redSvcSelector.MatchLabels,
-		},
-		Spec: v2alpha1.CiliumLoadBalancerIPPoolSpec{
-			Blocks: []v2alpha1.CiliumLoadBalancerIPPoolIPBlock{
-				{
-					Cidr: v2alpha1.IPv4orIPv6CIDR(ingressV4PoolPrefix),
-				},
-				{
-					Cidr: v2alpha1.IPv4orIPv6CIDR(ingressV6PoolPrefix),
-				},
-			},
-		},
-	}
 
 	redLBSvc = &slim_corev1.Service{
 		ObjectMeta: slim_metav1.ObjectMeta{
@@ -95,8 +77,13 @@ var (
 		cp.Spec.ExternalTrafficPolicy = eTP
 		return cp
 	}
+	redLBSvc2 = func() *slim_corev1.Service {
+		cp := redLBSvc.DeepCopy()
+		cp.Name = redLBSvc.Name + "2"
+		return cp
+	}
 
-	redPeer65001v4LBRPName = PolicyName("red-peer-65001", "ipv4", "red-lb-pool-non-default")
+	redPeer65001v4LBRPName = PolicyName("red-peer-65001", "ipv4", v2alpha1.BGPServiceAdvert, "red-svc-non-default-LoadBalancerIP")
 	redPeer65001v4LBRP     = &types.RoutePolicy{
 		Name: redPeer65001v4LBRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -106,7 +93,7 @@ var (
 					MatchNeighbors: []string{"10.10.10.1/32"},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
-							CIDR:         netip.MustParsePrefix(ingressV4PoolPrefix),
+							CIDR:         netip.MustParsePrefix(ingressV4Prefix),
 							PrefixLenMin: 32,
 							PrefixLenMax: 32,
 						},
@@ -119,8 +106,16 @@ var (
 			},
 		},
 	}
+	redPeer65001Svc2v4LBRPName = PolicyName("red-peer-65001", "ipv4", v2alpha1.BGPServiceAdvert, "red-svc2-non-default-LoadBalancerIP")
+	redPeer65001Svc2v4LBRP     = func() *types.RoutePolicy {
+		return &types.RoutePolicy{
+			Name:       redPeer65001Svc2v4LBRPName,
+			Type:       types.RoutePolicyTypeExport,
+			Statements: redPeer65001v4LBRP.Statements,
+		}
+	}
 
-	redPeer65001v6LBRPName = PolicyName("red-peer-65001", "ipv6", "red-lb-pool-non-default")
+	redPeer65001v6LBRPName = PolicyName("red-peer-65001", "ipv6", v2alpha1.BGPServiceAdvert, "red-svc-non-default-LoadBalancerIP")
 	redPeer65001v6LBRP     = &types.RoutePolicy{
 		Name: redPeer65001v6LBRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -130,7 +125,7 @@ var (
 					MatchNeighbors: []string{"10.10.10.1/32"},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
-							CIDR:         netip.MustParsePrefix(ingressV6PoolPrefix),
+							CIDR:         netip.MustParsePrefix(ingressV6Prefix),
 							PrefixLenMin: 128,
 							PrefixLenMax: 128,
 						},
@@ -142,6 +137,14 @@ var (
 				},
 			},
 		},
+	}
+	redPeer65001Svc2v6LBRPName = PolicyName("red-peer-65001", "ipv6", v2alpha1.BGPServiceAdvert, "red-svc2-non-default-LoadBalancerIP")
+	redPeer65001Svc2v6LBRP     = func() *types.RoutePolicy {
+		return &types.RoutePolicy{
+			Name:       redPeer65001Svc2v6LBRPName,
+			Type:       types.RoutePolicyTypeExport,
+			Statements: redPeer65001v6LBRP.Statements,
+		}
 	}
 
 	redExternalSvc = &slim_corev1.Service{
@@ -165,7 +168,7 @@ var (
 		return cp
 	}
 
-	redPeer65001v4ExtRPName = PolicyName("red-peer-65001", "ipv4", "red-svc-non-default-ExternalIP")
+	redPeer65001v4ExtRPName = PolicyName("red-peer-65001", "ipv4", v2alpha1.BGPServiceAdvert, "red-svc-non-default-ExternalIP")
 	redPeer65001v4ExtRP     = &types.RoutePolicy{
 		Name: redPeer65001v4ExtRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -189,7 +192,7 @@ var (
 		},
 	}
 
-	redPeer65001v6ExtRPName = PolicyName("red-peer-65001", "ipv6", "red-svc-non-default-ExternalIP")
+	redPeer65001v6ExtRPName = PolicyName("red-peer-65001", "ipv6", v2alpha1.BGPServiceAdvert, "red-svc-non-default-ExternalIP")
 	redPeer65001v6ExtRP     = &types.RoutePolicy{
 		Name: redPeer65001v6ExtRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -235,7 +238,7 @@ var (
 		return cp
 	}
 
-	redPeer65001v4ClusterRPName = PolicyName("red-peer-65001", "ipv4", "red-svc-non-default-ClusterIP")
+	redPeer65001v4ClusterRPName = PolicyName("red-peer-65001", "ipv4", v2alpha1.BGPServiceAdvert, "red-svc-non-default-ClusterIP")
 	redPeer65001v4ClusterRP     = &types.RoutePolicy{
 		Name: redPeer65001v4ClusterRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -259,7 +262,7 @@ var (
 		},
 	}
 
-	redPeer65001v6ClusterRPName = PolicyName("red-peer-65001", "ipv6", "red-svc-non-default-ClusterIP")
+	redPeer65001v6ClusterRPName = PolicyName("red-peer-65001", "ipv6", v2alpha1.BGPServiceAdvert, "red-svc-non-default-ClusterIP")
 	redPeer65001v6ClusterRP     = &types.RoutePolicy{
 		Name: redPeer65001v6ClusterRPName,
 		Type: types.RoutePolicyTypeExport,
@@ -513,7 +516,6 @@ func Test_ServiceLBReconciler(t *testing.T) {
 		name             string
 		peerConfig       []*v2alpha1.CiliumBGPPeerConfig
 		advertisements   []*v2alpha1.CiliumBGPAdvertisement
-		lbIPPools        []*v2alpha1.CiliumLoadBalancerIPPool
 		services         []*slim_corev1.Service
 		endpoints        []*k8s.Endpoints
 		expectedMetadata ServiceReconcilerMetadata
@@ -522,7 +524,6 @@ func Test_ServiceLBReconciler(t *testing.T) {
 			name:           "Service (LB) with advertisement( empty )",
 			peerConfig:     []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:       []*slim_corev1.Service{redLBSvc},
-			lbIPPools:      []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			advertisements: nil,
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
@@ -533,14 +534,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						{Afi: "ipv6", Safi: "unicast"}: nil,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - mismatch labels",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvc},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(mismatchSvcSelector)),
 			},
@@ -557,14 +556,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - matching labels (eTP=cluster)",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyCluster)},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector)),
 			},
@@ -579,7 +576,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				ServiceRoutePolicies: ResourceRoutePolicyMap{},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+				},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -590,19 +592,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{
-					redLBPoolKey: {
-						redPeer65001v4LBRPName: redPeer65001v4LBRP,
-						redPeer65001v6LBRPName: redPeer65001v6LBRP,
-					},
-				},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - matching labels (eTP=local, ep on node)",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal)},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			endpoints:  []*k8s.Endpoints{eps1Local},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector)),
@@ -618,7 +613,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				ServiceRoutePolicies: ResourceRoutePolicyMap{},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+				},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -629,19 +629,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{
-					redLBPoolKey: {
-						redPeer65001v4LBRPName: redPeer65001v4LBRP,
-						redPeer65001v6LBRPName: redPeer65001v6LBRP,
-					},
-				},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - matching labels (eTP=local, mixed ep)",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal)},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			endpoints:  []*k8s.Endpoints{eps1Mixed},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector)),
@@ -657,7 +650,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				ServiceRoutePolicies: ResourceRoutePolicyMap{},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+				},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -668,19 +666,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{
-					redLBPoolKey: {
-						redPeer65001v4LBRPName: redPeer65001v4LBRP,
-						redPeer65001v6LBRPName: redPeer65001v6LBRP,
-					},
-				},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - matching labels (eTP=local, ep on remote)",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal)},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			endpoints:  []*k8s.Endpoints{eps1Remote},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector)),
@@ -698,19 +689,12 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{ // route policies will exists even if there are no local eps
-					redLBPoolKey: {
-						redPeer65001v4LBRPName: redPeer65001v4LBRP,
-						redPeer65001v6LBRPName: redPeer65001v6LBRP,
-					},
-				},
 			},
 		},
 		{
 			name:       "Service (LB) with advertisement(LB) - matching labels (eTP=local, backends are terminating)",
 			peerConfig: []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal)},
-			lbIPPools:  []*v2alpha1.CiliumLoadBalancerIPPool{redLBPool},
 			endpoints:  []*k8s.Endpoints{eps1LocalTerminating},
 			advertisements: []*v2alpha1.CiliumBGPAdvertisement{
 				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector)),
@@ -728,12 +712,6 @@ func Test_ServiceLBReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{ // route policies will exists even if there are no local eps
-					redLBPoolKey: {
-						redPeer65001v4LBRPName: redPeer65001v4LBRP,
-						redPeer65001v6LBRPName: redPeer65001v6LBRP,
-					},
-				},
 			},
 		},
 	}
@@ -743,20 +721,21 @@ func Test_ServiceLBReconciler(t *testing.T) {
 			req := require.New(t)
 
 			params := ServiceReconcilerIn{
-				Logger: serviceIPPoolTestLogger,
+				Logger: serviceReconcilerTestLogger,
 				PeerAdvert: NewCiliumPeerAdvertisement(
 					PeerAdvertisementIn{
 						Logger:          podCIDRTestLogger,
 						PeerConfigStore: store.InitMockStore[*v2alpha1.CiliumBGPPeerConfig](tt.peerConfig),
 						AdvertStore:     store.InitMockStore[*v2alpha1.CiliumBGPAdvertisement](tt.advertisements),
 					}),
-				LBIPPoolStore: store.InitMockStore[*v2alpha1.CiliumLoadBalancerIPPool](tt.lbIPPools),
-				SvcDiffStore:  store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
-				EPDiffStore:   store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
+				SvcDiffStore: store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
+				EPDiffStore:  store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
 			}
 
 			svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
 			testBGPInstance := instance.NewFakeBGPInstance()
+			svcReconciler.Init(testBGPInstance)
+			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
 			for i := 0; i < 2; i++ {
@@ -770,6 +749,9 @@ func Test_ServiceLBReconciler(t *testing.T) {
 
 			// validate new metadata
 			serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+			// validate that advertised paths match expected metadata
+			advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
 		})
 	}
 }
@@ -782,7 +764,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 		name             string
 		peerConfig       []*v2alpha1.CiliumBGPPeerConfig
 		advertisements   []*v2alpha1.CiliumBGPAdvertisement
-		lbIPPools        []*v2alpha1.CiliumLoadBalancerIPPool
 		services         []*slim_corev1.Service
 		endpoints        []*k8s.Endpoints
 		expectedMetadata ServiceReconcilerMetadata
@@ -795,7 +776,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
@@ -814,7 +794,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -845,7 +824,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{
 					redSvcKey: RoutePolicyMap{
 						redPeer65001v4ExtRPName: redPeer65001v4ExtRP,
@@ -889,7 +867,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 						redPeer65001v6ExtRPName: redPeer65001v6ExtRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -927,7 +904,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 						redPeer65001v6ExtRPName: redPeer65001v6ExtRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -951,7 +927,6 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -971,20 +946,21 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 			req := require.New(t)
 
 			params := ServiceReconcilerIn{
-				Logger: serviceIPPoolTestLogger,
+				Logger: serviceReconcilerTestLogger,
 				PeerAdvert: NewCiliumPeerAdvertisement(
 					PeerAdvertisementIn{
 						Logger:          podCIDRTestLogger,
 						PeerConfigStore: store.InitMockStore[*v2alpha1.CiliumBGPPeerConfig](tt.peerConfig),
 						AdvertStore:     store.InitMockStore[*v2alpha1.CiliumBGPAdvertisement](tt.advertisements),
 					}),
-				LBIPPoolStore: store.InitMockStore[*v2alpha1.CiliumLoadBalancerIPPool](tt.lbIPPools),
-				SvcDiffStore:  store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
-				EPDiffStore:   store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
+				SvcDiffStore: store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
+				EPDiffStore:  store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
 			}
 
 			svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
 			testBGPInstance := instance.NewFakeBGPInstance()
+			svcReconciler.Init(testBGPInstance)
+			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
 			for i := 0; i < 2; i++ {
@@ -998,6 +974,9 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 
 			// validate new metadata
 			serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+			// validate that advertised paths match expected metadata
+			advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
 		})
 	}
 }
@@ -1010,7 +989,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 		name             string
 		peerConfig       []*v2alpha1.CiliumBGPPeerConfig
 		advertisements   []*v2alpha1.CiliumBGPAdvertisement
-		lbIPPools        []*v2alpha1.CiliumLoadBalancerIPPool
 		services         []*slim_corev1.Service
 		endpoints        []*k8s.Endpoints
 		expectedMetadata ServiceReconcilerMetadata
@@ -1023,7 +1001,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
@@ -1042,7 +1019,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1079,7 +1055,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1117,7 +1092,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1155,7 +1129,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1179,7 +1152,6 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1199,20 +1171,21 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			req := require.New(t)
 
 			params := ServiceReconcilerIn{
-				Logger: serviceIPPoolTestLogger,
+				Logger: serviceReconcilerTestLogger,
 				PeerAdvert: NewCiliumPeerAdvertisement(
 					PeerAdvertisementIn{
 						Logger:          podCIDRTestLogger,
 						PeerConfigStore: store.InitMockStore[*v2alpha1.CiliumBGPPeerConfig](tt.peerConfig),
 						AdvertStore:     store.InitMockStore[*v2alpha1.CiliumBGPAdvertisement](tt.advertisements),
 					}),
-				LBIPPoolStore: store.InitMockStore[*v2alpha1.CiliumLoadBalancerIPPool](tt.lbIPPools),
-				SvcDiffStore:  store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
-				EPDiffStore:   store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
+				SvcDiffStore: store.InitFakeDiffStore[*slim_corev1.Service](tt.services),
+				EPDiffStore:  store.InitFakeDiffStore[*k8s.Endpoints](tt.endpoints),
 			}
 
 			svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
 			testBGPInstance := instance.NewFakeBGPInstance()
+			svcReconciler.Init(testBGPInstance)
+			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
 			for i := 0; i < 2; i++ {
@@ -1226,6 +1199,9 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 
 			// validate new metadata
 			serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+			// validate that advertised paths match expected metadata
+			advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
 		})
 	}
 }
@@ -1251,7 +1227,6 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 			expectedMetadata: ServiceReconcilerMetadata{
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
@@ -1296,7 +1271,6 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1367,7 +1341,6 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 						},
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{
 					redSvcKey: RoutePolicyMap{
 						redPeer65001v4ClusterRPName: redPeer65001v4ClusterRP,
@@ -1429,7 +1402,6 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 				// Both cluster and external IPs are withdrawn, since traffic policy is local and there are no endpoints.
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
-				LBPoolRoutePolicies:  ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1497,7 +1469,6 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 						redPeer65001v6ExtRPName:     redPeer65001v6ExtRP,
 					},
 				},
-				LBPoolRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
 					"red-peer-65001": PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
@@ -1546,23 +1517,23 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 	advertStore := store.NewMockBGPCPResourceStore[*v2alpha1.CiliumBGPAdvertisement]()
 	serviceStore := store.NewFakeDiffStore[*slim_corev1.Service]()
 	epStore := store.NewFakeDiffStore[*k8s.Endpoints]()
-	lbPoolStore := store.NewMockBGPCPResourceStore[*v2alpha1.CiliumLoadBalancerIPPool]()
 
 	params := ServiceReconcilerIn{
-		Logger: serviceIPPoolTestLogger,
+		Logger: serviceReconcilerTestLogger,
 		PeerAdvert: NewCiliumPeerAdvertisement(
 			PeerAdvertisementIn{
 				Logger:          podCIDRTestLogger,
 				PeerConfigStore: store.InitMockStore[*v2alpha1.CiliumBGPPeerConfig](peerConfigs),
 				AdvertStore:     advertStore,
 			}),
-		LBIPPoolStore: lbPoolStore,
-		SvcDiffStore:  serviceStore,
-		EPDiffStore:   epStore,
+		SvcDiffStore: serviceStore,
+		EPDiffStore:  epStore,
 	}
 
 	svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
 	testBGPInstance := instance.NewFakeBGPInstance()
+	svcReconciler.Init(testBGPInstance)
+	defer svcReconciler.Cleanup(testBGPInstance)
 
 	for _, tt := range steps {
 		t.Logf("Running step - %s", tt.name)
@@ -1587,6 +1558,316 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 
 		// validate new metadata
 		serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+		// validate that advertised paths match expected metadata
+		advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
+	}
+}
+
+func Test_ServiceVIPSharing(t *testing.T) {
+	logrus.SetLevel(logrus.DebugLevel)
+
+	peerConfigs := []*v2alpha1.CiliumBGPPeerConfig{redPeerConfig}
+
+	steps := []struct {
+		name             string
+		upsertAdverts    []*v2alpha1.CiliumBGPAdvertisement
+		upsertServices   []*slim_corev1.Service
+		deletetServices  []*slim_corev1.Service
+		upsertEPs        []*k8s.Endpoints
+		expectedMetadata ServiceReconcilerMetadata
+	}{
+		{
+			name: "Add service 1 (LoadBalancer) with advertisement",
+			upsertAdverts: []*v2alpha1.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(v2alpha1.BGPAdvertisement{
+					AdvertisementType: v2alpha1.BGPServiceAdvert,
+					Service: &v2alpha1.BGPServiceOptions{
+						Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+					},
+					Selector: redSvcSelector,
+					Attributes: &v2alpha1.BGPAttributes{
+						Communities: &v2alpha1.BGPCommunities{
+							Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+							WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+						},
+					},
+				}),
+			},
+			upsertServices: []*slim_corev1.Service{redLBSvc},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					"red-peer-65001": PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:           "Add service 2 (LoadBalancer) with the same VIP",
+			upsertServices: []*slim_corev1.Service{redLBSvc2()},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+					redSvc2Key: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+					redSvc2Key: RoutePolicyMap{
+						redPeer65001Svc2v4LBRPName: redPeer65001Svc2v4LBRP(),
+						redPeer65001Svc2v6LBRPName: redPeer65001Svc2v6LBRP(),
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					"red-peer-65001": PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:            "Delete service 1",
+			deletetServices: []*slim_corev1.Service{redLBSvc},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvc2Key: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvc2Key: RoutePolicyMap{
+						redPeer65001Svc2v4LBRPName: redPeer65001Svc2v4LBRP(),
+						redPeer65001Svc2v6LBRPName: redPeer65001Svc2v6LBRP(),
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					"red-peer-65001": PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:            "Delete service 2",
+			deletetServices: []*slim_corev1.Service{redLBSvc2()},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths:         ResourceAFPathsMap{},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{},
+				ServiceAdvertisements: PeerAdvertisements{
+					"red-peer-65001": PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2alpha1.BGPAdvertisement{
+							{
+								AdvertisementType: v2alpha1.BGPServiceAdvert,
+								Service: &v2alpha1.BGPServiceOptions{
+									Addresses: []v2alpha1.BGPServiceAddressType{v2alpha1.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2alpha1.BGPAttributes{
+									Communities: &v2alpha1.BGPCommunities{
+										Standard:  []v2alpha1.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2alpha1.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	req := require.New(t)
+	advertStore := store.NewMockBGPCPResourceStore[*v2alpha1.CiliumBGPAdvertisement]()
+	serviceStore := store.NewFakeDiffStore[*slim_corev1.Service]()
+	epStore := store.NewFakeDiffStore[*k8s.Endpoints]()
+
+	params := ServiceReconcilerIn{
+		Logger: serviceReconcilerTestLogger,
+		PeerAdvert: NewCiliumPeerAdvertisement(
+			PeerAdvertisementIn{
+				Logger:          podCIDRTestLogger,
+				PeerConfigStore: store.InitMockStore[*v2alpha1.CiliumBGPPeerConfig](peerConfigs),
+				AdvertStore:     advertStore,
+			}),
+		SvcDiffStore: serviceStore,
+		EPDiffStore:  epStore,
+	}
+
+	svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
+	testBGPInstance := instance.NewFakeBGPInstance()
+	svcReconciler.Init(testBGPInstance)
+	defer svcReconciler.Cleanup(testBGPInstance)
+
+	for _, tt := range steps {
+		t.Logf("Running step - %s", tt.name)
+		for _, advert := range tt.upsertAdverts {
+			advertStore.Upsert(advert)
+		}
+
+		for _, svc := range tt.upsertServices {
+			serviceStore.Upsert(svc)
+		}
+
+		for _, svc := range tt.deletetServices {
+			serviceStore.Delete(resource.Key{Name: svc.Name, Namespace: svc.Namespace})
+		}
+
+		for _, ep := range tt.upsertEPs {
+			epStore.Upsert(ep)
+		}
+
+		err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
+			BGPInstance:   testBGPInstance,
+			DesiredConfig: testBGPInstanceConfig,
+			CiliumNode:    testCiliumNodeConfig,
+		})
+		req.NoError(err)
+
+		// validate new metadata
+		serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+		// validate that advertised paths match expected metadata
+		advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
 	}
 }
 
@@ -1624,9 +1905,30 @@ func serviceMetadataEqual(req *require.Assertions, expectedMetadata, runningMeta
 		req.Equal(expectedFamilyPaths, runningFamilyPaths)
 	}
 
-	req.Equalf(expectedMetadata.LBPoolRoutePolicies, runningMetadata.LBPoolRoutePolicies,
-		"LBPoolRoutePolicies mismatch, expected: %v, got: %v", expectedMetadata.LBPoolRoutePolicies, runningMetadata.LBPoolRoutePolicies)
-
 	req.Equalf(expectedMetadata.ServiceRoutePolicies, runningMetadata.ServiceRoutePolicies,
 		"ServiceRoutePolicies mismatch, expected: %v, got: %v", expectedMetadata.ServiceRoutePolicies, runningMetadata.ServiceRoutePolicies)
+}
+
+func advertisedPrefixesMatch(req *require.Assertions, bgpInstance *instance.BGPInstance, expectedPaths ResourceAFPathsMap) {
+	expected := make(map[string]*types.Path)
+	for _, svcPaths := range expectedPaths {
+		for _, afPaths := range svcPaths {
+			for _, path := range afPaths {
+				expected[path.NLRI.String()] = path
+			}
+		}
+	}
+
+	advertised := make(map[string]*types.Path)
+	routes, err := bgpInstance.Router.GetRoutes(context.Background(), &types.GetRoutesRequest{TableType: types.TableTypeLocRIB})
+	req.NoError(err)
+	for _, route := range routes.Routes {
+		for _, path := range route.Paths {
+			advertised[path.NLRI.String()] = path
+		}
+	}
+
+	expPrefixes := slices.Collect(maps.Keys(expected))
+	advPrefixes := slices.Collect(maps.Keys(advertised))
+	req.ElementsMatchf(expPrefixes, advPrefixes, "advertised prefixes do not match expected metadata, expected: %v, got: %v", expPrefixes, advPrefixes)
 }

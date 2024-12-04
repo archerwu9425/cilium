@@ -6,6 +6,13 @@ Create chart name and version as used by the chart label.
 {{- end }}
 
 {{/*
+Return the namespace to use for namespaced resources.
+*/}}
+{{- define "cilium.namespace" -}}
+{{- .Values.namespaceOverride | default .Release.Namespace -}}
+{{- end -}}
+
+{{/*
 Render full image name from given values, e.g:
 ```
 image:
@@ -15,14 +22,18 @@ image:
   digest: abcdefgh
 ```
 then `include "cilium.image" .Values.image`
-will return `quay.io/cilium/cilium:v1.10.1@abcdefgh`
+will return `quay.io/cilium/cilium:v1.10.1@abcdefgh`.
+Note that you can omit the tag by setting its value to `null` or `""` (in case
+your container engine doesn't support specifying both the tag and digest for
+instance).
 */}}
 {{- define "cilium.image" -}}
 {{- $digest := (.useDigest | default false) | ternary (printf "@%s" .digest) "" -}}
+{{- $tag := .tag | default "" | eq "" | ternary "" (printf ":%s" .tag) -}}
 {{- if .override -}}
 {{- printf "%s" .override -}}
 {{- else -}}
-{{- printf "%s:%s%s" .repository .tag $digest -}}
+{{- printf "%s%s%s" .repository $tag $digest -}}
 {{- end -}}
 {{- end -}}
 
@@ -65,7 +76,7 @@ and `commonCASecretName` variables.
     {{- if and $crt $key }}
       {{- $ca = buildCustomCert $crt $key -}}
     {{- else }}
-      {{- with lookup "v1" "Secret" .Release.Namespace $secretName }}
+      {{- with lookup "v1" "Secret" (include "cilium.namespace" .) $secretName }}
         {{- $crt := index .data "ca.crt" }}
         {{- $key := index .data "ca.key" }}
         {{- $ca = buildCustomCert $crt $key -}}
@@ -112,11 +123,16 @@ Convert a map to a comma-separated string: key1=value1,key2=value2
 {{- end -}}
 
 {{/*
-Enable automatic lookup of k8sServiceHost from the cluster-info ConfigMap (kubeadm-based clusters only)
+Enable automatic lookup of k8sServiceHost from the cluster-info ConfigMap
+When `auto`, it defaults to lookup for a `cluster-info` configmap on the `kube-public` namespace (kubeadm-based)
+To override the namespace and configMap when using `auto`:
+`.Values.k8sServiceLookupNamespace` and `.Values.k8sServiceLookupConfigMapName`
 */}}
 {{- define "k8sServiceHost" }}
-  {{- if eq .Values.k8sServiceHost "auto" }}
-    {{- $configmap := (lookup "v1" "ConfigMap" "kube-public" "cluster-info") }}
+  {{- $configmapName := default "cluster-info" .Values.k8sServiceLookupConfigMapName }}
+  {{- $configmapNamespace := default "kube-public" .Values.k8sServiceLookupNamespace }}
+  {{- if and (eq .Values.k8sServiceHost "auto") (lookup "v1" "ConfigMap" $configmapNamespace $configmapName) }}
+    {{- $configmap := (lookup "v1" "ConfigMap" $configmapNamespace $configmapName) }}
     {{- $kubeconfig := get $configmap.data "kubeconfig" }}
     {{- $k8sServer := get ($kubeconfig | fromYaml) "clusters" | mustFirst | dig "cluster" "server" "" }}
     {{- $uri := (split "https://" $k8sServer)._1 | trim }}
@@ -127,11 +143,16 @@ Enable automatic lookup of k8sServiceHost from the cluster-info ConfigMap (kubea
 {{- end }}
 
 {{/*
-Enable automatic lookup of k8sServicePort from the cluster-info ConfigMap (kubeadm-based clusters only)
+Enable automatic lookup of k8sServicePort from the cluster-info ConfigMap
+When `auto`, it defaults to lookup for a `cluster-info` configmap on the `kube-public` namespace (kubeadm-based)
+To override the namespace and configMap when using `auto`:
+`.Values.k8sServiceLookupNamespace` and `.Values.k8sServiceLookupConfigMapName`
 */}}
 {{- define "k8sServicePort" }}
-  {{- if eq .Values.k8sServiceHost "auto" }}
-    {{- $configmap := (lookup "v1" "ConfigMap" "kube-public" "cluster-info") }}
+  {{- $configmapName := default "cluster-info" .Values.k8sServiceLookupConfigMapName }}
+  {{- $configmapNamespace := default "kube-public" .Values.k8sServiceLookupNamespace }}
+  {{- if and (eq .Values.k8sServiceHost "auto") (lookup "v1" "ConfigMap" $configmapNamespace $configmapName) }}
+    {{- $configmap := (lookup "v1" "ConfigMap" $configmapNamespace $configmapName) }}
     {{- $kubeconfig := get $configmap.data "kubeconfig" }}
     {{- $k8sServer := get ($kubeconfig | fromYaml) "clusters" | mustFirst | dig "cluster" "server" "" }}
     {{- $uri := (split "https://" $k8sServer)._1 | trim }}

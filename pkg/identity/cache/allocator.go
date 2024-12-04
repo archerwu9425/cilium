@@ -26,6 +26,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/identitybackend"
 	"github.com/cilium/cilium/pkg/kvstore"
 	kvstoreallocator "github.com/cilium/cilium/pkg/kvstore/allocator"
+	"github.com/cilium/cilium/pkg/kvstore/allocator/doublewrite"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -85,6 +86,18 @@ type CachingIdentityAllocator struct {
 	// checkpointPath is the file where local allocator state should be checkpoointed.
 	// The default is /run/cilium/state/local_allocator_state.json, changed only for testing.
 	checkpointPath string
+
+	// operatorIDManagement indicates if cilium-operator is managing Cilium Identities.
+	operatorIDManagement bool
+
+	// maxAllocAttempts is the number of attempted allocation requests
+	// performed before failing. This is mainly introduced for testing purposes.
+	maxAllocAttempts int
+}
+
+type AllocatorConfig struct {
+	EnableOperatorManageCIDs bool
+	maxAllocAttempts         int
 }
 
 // IdentityAllocatorOwner is the interface the owner of an identity allocator
@@ -198,7 +211,13 @@ func (m *CachingIdentityAllocator) InitIdentityAllocator(client clientset.Interf
 		switch option.Config.IdentityAllocationMode {
 		case option.IdentityAllocationModeKVstore:
 			log.Debug("Identity allocation backed by KVStore")
-			backend, err = kvstoreallocator.NewKVStoreBackend(m.identitiesPath, owner.GetNodeSuffix(), &key.GlobalIdentity{}, kvstore.Client())
+			backend, err = kvstoreallocator.NewKVStoreBackend(
+				kvstoreallocator.KVStoreBackendConfiguration{
+					BasePath: m.identitiesPath,
+					Suffix:   owner.GetNodeSuffix(),
+					Typ:      &key.GlobalIdentity{},
+					Backend:  kvstore.Client(),
+				})
 			if err != nil {
 				log.WithError(err).Fatal("Unable to initialize kvstore backend for identity allocation")
 			}
@@ -214,15 +233,47 @@ func (m *CachingIdentityAllocator) InitIdentityAllocator(client clientset.Interf
 				log.WithError(err).Fatal("Unable to initialize Kubernetes CRD backend for identity allocation")
 			}
 
+		case option.IdentityAllocationModeDoubleWriteReadKVstore, option.IdentityAllocationModeDoubleWriteReadCRD:
+			readFromKVStore := true
+			if option.Config.IdentityAllocationMode == option.IdentityAllocationModeDoubleWriteReadCRD {
+				readFromKVStore = false
+			}
+			log.Debugf("Double-Write Identity allocation mode (CRD and KVStore) with reads from KVStore = %t", readFromKVStore)
+			backend, err = doublewrite.NewDoubleWriteBackend(doublewrite.DoubleWriteBackendConfiguration{
+				CRDBackendConfiguration: identitybackend.CRDBackendConfiguration{
+					Store:   nil,
+					Client:  client,
+					KeyFunc: (&key.GlobalIdentity{}).PutKeyFromMap,
+				},
+				KVStoreBackendConfiguration: kvstoreallocator.KVStoreBackendConfiguration{
+					BasePath: m.identitiesPath,
+					Suffix:   owner.GetNodeSuffix(),
+					Typ:      &key.GlobalIdentity{},
+					Backend:  kvstore.Client(),
+				},
+				ReadFromKVStore: readFromKVStore,
+			})
+			if err != nil {
+				log.WithError(err).Fatal("Unable to initialize the Double Write backend for identity allocation")
+			}
 		default:
 			log.Fatalf("Unsupported identity allocation mode %s", option.Config.IdentityAllocationMode)
 		}
 
-		a, err := allocator.NewAllocator(&key.GlobalIdentity{}, backend,
+		allocOptions := []allocator.AllocatorOption{
 			allocator.WithMax(maxID), allocator.WithMin(minID),
 			allocator.WithEvents(events),
-			allocator.WithMasterKeyProtection(),
-			allocator.WithPrefixMask(idpool.ID(option.Config.ClusterID<<identity.GetClusterIDShift())))
+			allocator.WithPrefixMask(idpool.ID(option.Config.ClusterID << identity.GetClusterIDShift())),
+		}
+		if m.operatorIDManagement {
+			allocOptions = append(allocOptions, allocator.WithOperatorIDManagement())
+		} else {
+			allocOptions = append(allocOptions, allocator.WithMasterKeyProtection())
+		}
+		if m.maxAllocAttempts > 0 {
+			allocOptions = append(allocOptions, allocator.WithMaxAllocAttempts(m.maxAllocAttempts))
+		}
+		a, err := allocator.NewAllocator(&key.GlobalIdentity{}, backend, allocOptions...)
 		if err != nil {
 			log.WithError(err).Fatalf("Unable to initialize Identity Allocator with backend %s", option.Config.IdentityAllocationMode)
 		}
@@ -277,7 +328,7 @@ const eventsQueueSize = 1024
 
 // NewCachingIdentityAllocator creates a new instance of an
 // CachingIdentityAllocator.
-func NewCachingIdentityAllocator(owner IdentityAllocatorOwner) *CachingIdentityAllocator {
+func NewCachingIdentityAllocator(owner IdentityAllocatorOwner, config AllocatorConfig) *CachingIdentityAllocator {
 	watcher := identityWatcher{
 		owner: owner,
 	}
@@ -288,6 +339,8 @@ func NewCachingIdentityAllocator(owner IdentityAllocatorOwner) *CachingIdentityA
 		identitiesPath:                     IdentitiesPath,
 		watcher:                            watcher,
 		events:                             make(allocator.AllocatorEventChan, eventsQueueSize),
+		operatorIDManagement:               config.EnableOperatorManageCIDs,
+		maxAllocAttempts:                   config.maxAllocAttempts,
 	}
 	if option.Config.RunDir != "" { // disable checkpointing if this is a unit test
 		m.checkpointPath = filepath.Join(option.Config.StateDir, CheckpointFile)
@@ -736,7 +789,7 @@ func (m *CachingIdentityAllocator) Release(ctx context.Context, id *identity.Ide
 // identity cache. remoteName should be unique unless replacing an existing
 // remote's backend. When cachedPrefix is set, identities are assumed to be
 // stored under the "cilium/cache" prefix, and the watcher is adapted accordingly.
-func (m *CachingIdentityAllocator) WatchRemoteIdentities(remoteName string, remoteID uint32, backend kvstore.BackendOperations, cachedPrefix bool) (*allocator.RemoteCache, error) {
+func (m *CachingIdentityAllocator) WatchRemoteIdentities(remoteName string, remoteID uint32, backend kvstore.BackendOperations, cachedPrefix bool) (allocator.RemoteIDCache, error) {
 	<-m.globalIdentityAllocatorInitialized
 
 	prefix := m.identitiesPath
@@ -744,7 +797,7 @@ func (m *CachingIdentityAllocator) WatchRemoteIdentities(remoteName string, remo
 		prefix = path.Join(kvstore.StateToCachePrefix(prefix), remoteName)
 	}
 
-	remoteAllocatorBackend, err := kvstoreallocator.NewKVStoreBackend(prefix, m.owner.GetNodeSuffix(), &key.GlobalIdentity{}, backend)
+	remoteAllocatorBackend, err := kvstoreallocator.NewKVStoreBackend(kvstoreallocator.KVStoreBackendConfiguration{BasePath: prefix, Suffix: m.owner.GetNodeSuffix(), Typ: &key.GlobalIdentity{}, Backend: backend})
 	if err != nil {
 		return nil, fmt.Errorf("error setting up remote allocator backend: %w", err)
 	}

@@ -6,6 +6,7 @@ package bitlpm
 import (
 	"math/bits"
 	"net/netip"
+	"unsafe"
 )
 
 // CIDRTrie can hold both IPv4 and IPv6 prefixes
@@ -30,14 +31,20 @@ func (c *CIDRTrie[T]) ExactLookup(cidr netip.Prefix) (T, bool) {
 }
 
 // LongestPrefixMatch returns the longest matched value for a given address.
-func (c *CIDRTrie[T]) LongestPrefixMatch(addr netip.Addr) (T, bool) {
+func (c *CIDRTrie[T]) LongestPrefixMatch(addr netip.Addr) (netip.Prefix, T, bool) {
 	if !addr.IsValid() {
+		var p netip.Prefix
 		var def T
-		return def, false
+		return p, def, false
 	}
 	bits := addr.BitLen()
 	prefix := netip.PrefixFrom(addr, bits)
-	return c.treeForFamily(prefix).LongestPrefixMatch(cidrKey(prefix))
+	k, v, ok := c.treeForFamily(prefix).LongestPrefixMatch(cidrKey(prefix))
+	if ok {
+		return k.Value(), v, ok
+	}
+	var p netip.Prefix
+	return p, v, ok
 }
 
 // Ancestors iterates over every CIDR pair that contains the CIDR argument.
@@ -47,11 +54,42 @@ func (c *CIDRTrie[T]) Ancestors(cidr netip.Prefix, fn func(k netip.Prefix, v T) 
 	})
 }
 
+func (c *CIDRTrie[T]) AncestorIterator(cidr netip.Prefix) Iterator[Key[netip.Prefix], T] {
+	return c.treeForFamily(cidr).AncestorIterator(uint(cidr.Bits()), cidrKey(cidr))
+}
+
+// AncestorsLongestPrefixFirst iterates over every CIDR pair that contains the CIDR argument,
+// longest matching prefix first, then iterating towards the root of the trie.
+func (c *CIDRTrie[T]) AncestorsLongestPrefixFirst(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
+	c.treeForFamily(cidr).AncestorsLongestPrefixFirst(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k Key[netip.Prefix], v T) bool {
+		return fn(k.Value(), v)
+	})
+}
+
+func (c *CIDRTrie[T]) AncestorLongestPrefixFirstIterator(cidr netip.Prefix) Iterator[Key[netip.Prefix], T] {
+	return c.treeForFamily(cidr).AncestorLongestPrefixFirstIterator(uint(cidr.Bits()), cidrKey(cidr))
+}
+
 // Descendants iterates over every CIDR that is contained by the CIDR argument.
 func (c *CIDRTrie[T]) Descendants(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
 	c.treeForFamily(cidr).Descendants(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k Key[netip.Prefix], v T) bool {
 		return fn(k.Value(), v)
 	})
+}
+
+func (c *CIDRTrie[T]) DescendantIterator(cidr netip.Prefix) Iterator[Key[netip.Prefix], T] {
+	return c.treeForFamily(cidr).DescendantIterator(uint(cidr.Bits()), cidrKey(cidr))
+}
+
+// DescendantsShortestPrefixFirst iterates over every CIDR that is contained by the CIDR argument.
+func (c *CIDRTrie[T]) DescendantsShortestPrefixFirst(cidr netip.Prefix, fn func(k netip.Prefix, v T) bool) {
+	c.treeForFamily(cidr).DescendantsShortestPrefixFirst(uint(cidr.Bits()), cidrKey(cidr), func(prefix uint, k Key[netip.Prefix], v T) bool {
+		return fn(k.Value(), v)
+	})
+}
+
+func (c *CIDRTrie[T]) DescendantShortestPrefixFirstIterator(cidr netip.Prefix) Iterator[Key[netip.Prefix], T] {
+	return c.treeForFamily(cidr).DescendantShortestPrefixFirstIterator(uint(cidr.Bits()), cidrKey(cidr))
 }
 
 // Upsert adds or updates the value for a given prefix.
@@ -102,25 +140,33 @@ func (k cidrKey) Value() netip.Prefix {
 }
 
 func (k cidrKey) BitValueAt(idx uint) uint8 {
-	bytes := netip.Prefix(k).Addr().AsSlice()
-	byt := bytes[idx/8]
-	if byt&(1<<(7-(idx%8))) == 0 {
-		return 0
+	addr := netip.Prefix(k).Addr()
+	if addr.Is4() {
+		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[1]
+		return uint8((word >> (31 - idx)) & 1)
 	}
-	return 1
+	if idx < 64 {
+		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[0]
+		return uint8((word >> (63 - idx)) & 1)
+	} else {
+		word := (*(*[2]uint64)(unsafe.Pointer(&addr)))[1]
+		return uint8((word >> (127 - idx)) & 1)
+	}
 }
 
 func (k cidrKey) CommonPrefix(k2 netip.Prefix) uint {
-	out := uint(0)
-	b1 := k.Value().Addr().AsSlice()
-	b2 := k2.Addr().AsSlice()
-
-	for i := range b1 {
-		v := bits.LeadingZeros8(b1[i] ^ b2[i])
-		out += uint(v)
-		if v != 8 {
-			break
-		}
+	addr1 := netip.Prefix(k).Addr()
+	addr2 := k2.Addr()
+	words1 := (*[2]uint64)(unsafe.Pointer(&addr1))
+	words2 := (*[2]uint64)(unsafe.Pointer(&addr2))
+	if addr1.Is4() {
+		word1 := uint32((*words1)[1])
+		word2 := uint32((*words2)[1])
+		return uint(bits.LeadingZeros32(word1 ^ word2))
 	}
-	return out
+	v := bits.LeadingZeros64((*words1)[0] ^ (*words2)[0])
+	if v == 64 {
+		v += bits.LeadingZeros64((*words1)[1] ^ (*words2)[1])
+	}
+	return uint(v)
 }

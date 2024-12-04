@@ -49,6 +49,9 @@ assign_socket_udp(struct __ctx_buff *ctx,
 	struct bpf_sock *sk;
 	__u32 dbg_ctx;
 
+	if (established)
+		goto out;
+
 	sk = sk_lookup_udp(ctx, tuple, len, BPF_F_CURRENT_NETNS, 0);
 	if (!sk)
 		goto out;
@@ -232,7 +235,6 @@ __ctx_redirect_to_proxy(struct __ctx_buff *ctx, void *tuple __maybe_unused,
 #endif /* ENABLE_IPV6 */
 	}
 #endif /* ENABLE_TPROXY */
-	ctx_change_type(ctx, PACKET_HOST); /* Required for ingress packets from overlay */
 	return result;
 }
 
@@ -284,18 +286,11 @@ IP_TUPLE_EXTRACT_FN(extract_tuple4, ipv4)
 #ifdef ENABLE_IPV6
 IP_TUPLE_EXTRACT_FN(extract_tuple6, ipv6)
 #endif /* ENABLE_IPV6 */
-#endif /* ENABLE_TPROXY */
 
-/**
- * ctx_redirect_to_proxy_first() applies changes to the context to forward
- * the packet towards the proxy. It is designed to run as the first function
- * that accesses the context from the current BPF program.
- */
 static __always_inline int
-ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
+ctx_redirect_to_proxy_first_tproxy(struct __ctx_buff *ctx, __be16 proxy_port)
 {
 	int ret = CTX_ACT_OK;
-#if defined(ENABLE_TPROXY)
 	__u16 proto;
 #ifdef ENABLE_IPV4
 	__be32 ipv4_localhost = bpf_htonl(INADDR_LOOPBACK);
@@ -313,7 +308,7 @@ ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
 	 * See ct_state.proxy_redirect usage in bpf_lxc.c for more info.
 	 */
 	if (!proxy_port)
-		goto mark;
+		return CTX_ACT_OK;
 
 	if (!validate_ethertype(ctx, &proto))
 		return DROP_UNSUPPORTED_L2;
@@ -344,17 +339,56 @@ ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
 	}
 #endif /* ENABLE_IPV4 */
 	default:
-		goto out;
+		break;
 	}
+
+	return ret;
+}
 #endif /* ENABLE_TPROXY */
 
-mark: __maybe_unused;
+/**
+ * ctx_redirect_to_proxy_first() applies changes to the context to forward
+ * the packet towards the proxy. It is designed to run as the first function
+ * that accesses the context from the current BPF program.
+ */
+static __always_inline int
+ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
+{
+	int ret = CTX_ACT_OK;
+
+#if defined(ENABLE_TPROXY)
+	ret = ctx_redirect_to_proxy_first_tproxy(ctx, proxy_port);
+	if (IS_ERR(ret))
+		return ret;
+#endif /* ENABLE_TPROXY */
+
 	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_POST, proxy_port);
 	ctx->mark = MARK_MAGIC_TO_PROXY | (proxy_port << 16);
 	ctx_change_type(ctx, PACKET_HOST);
-
-out: __maybe_unused;
 	return ret;
+}
+
+/**
+ * ctx_redirect_to_proxy_host_egress() redirects a host packet to proxy.
+ * It is intended to be invoked solely from egress. It does not use BPF-based
+ * tproxy because the bpf_sk_assign() helper is only valid on tc ingress path.
+ * The packet is redirected to cilium-host interface to avoid setting sysctl
+ * allow_local = 1 on the physical netdev, which would otherwise be required
+ * for packets hairpinned back into it to pass the fib_validate_source check.
+ */
+static __always_inline int
+ctx_redirect_to_proxy_host_egress(struct __ctx_buff *ctx, __be16 proxy_port)
+{
+	union macaddr mac = HOST_IFINDEX_MAC;
+
+	ctx->mark = MARK_MAGIC_TO_PROXY | proxy_port << 16;
+
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port);
+
+	if (eth_store_daddr(ctx, (__u8 *)&mac, 0) < 0)
+		return DROP_WRITE_ERROR;
+
+	return ctx_redirect(ctx, CILIUM_IFINDEX, BPF_F_INGRESS);
 }
 
 /**

@@ -5,11 +5,14 @@ package k8s
 
 import (
 	"context"
+	"net/netip"
 
 	"github.com/cilium/hive/cell"
-	"github.com/cilium/stream"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/cilium/cilium/pkg/counter"
+	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2_alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
@@ -51,7 +54,12 @@ type PolicyManager interface {
 }
 
 type serviceCache interface {
-	ForEachService(func(svcID k8s.ServiceID, svc *k8s.Service, eps *k8s.Endpoints) bool)
+	ForEachService(func(svcID k8s.ServiceID, svc *k8s.Service, eps *k8s.EndpointSlices) bool)
+}
+
+type ipc interface {
+	UpsertMetadataBatch(updates ...ipcache.MU) (revision uint64)
+	RemoveMetadataBatch(updates ...ipcache.MU) (revision uint64)
 }
 
 type PolicyWatcherParams struct {
@@ -68,6 +76,7 @@ type PolicyWatcherParams struct {
 
 	PolicyManager promise.Promise[PolicyManager]
 	ServiceCache  *k8s.ServiceCache
+	IPCache       *ipcache.IPCache
 
 	CiliumNetworkPolicies            resource.Resource[*cilium_v2.CiliumNetworkPolicy]
 	CiliumClusterwideNetworkPolicies resource.Resource[*cilium_v2.CiliumClusterwideNetworkPolicy]
@@ -83,8 +92,7 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 	// We want to subscribe before the start hook is invoked in order to not miss
 	// any events
 	ctx, cancel := context.WithCancel(context.Background())
-	svcCacheNotifications := stream.ToChannel(ctx, params.ServiceCache.Notifications(),
-		stream.WithBufferSize(int(params.Config.K8sServiceCacheSize)))
+	svcCacheNotifications := serviceNotificationsQueue(ctx, params.ServiceCache.Notifications())
 
 	p := &policyWatcher{
 		log:                              params.Logger,
@@ -93,14 +101,16 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 		k8sAPIGroups:                     params.K8sAPIGroups,
 		svcCache:                         params.ServiceCache,
 		svcCacheNotifications:            svcCacheNotifications,
+		ipCache:                          params.IPCache,
 		ciliumNetworkPolicies:            params.CiliumNetworkPolicies,
 		ciliumClusterwideNetworkPolicies: params.CiliumClusterwideNetworkPolicies,
 		ciliumCIDRGroups:                 params.CiliumCIDRGroups,
 		networkPolicies:                  params.NetworkPolicies,
 
-		cnpCache:          make(map[resource.Key]*types.SlimCNP),
-		cidrGroupCache:    make(map[string]*cilium_v2_alpha1.CiliumCIDRGroup),
-		cidrGroupPolicies: make(map[resource.Key]struct{}),
+		cnpCache:       make(map[resource.Key]*types.SlimCNP),
+		cidrGroupCache: make(map[string]*cilium_v2_alpha1.CiliumCIDRGroup),
+		cidrGroupCIDRs: make(map[string]sets.Set[netip.Prefix]),
+		cidrGroupRefs:  make(counter.Counter[string]),
 
 		toServicesPolicies: make(map[resource.Key]struct{}),
 		cnpByServiceID:     make(map[k8s.ServiceID]map[resource.Key]struct{}),
@@ -129,13 +139,21 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 			return p.knpSynced.Load()
 		})
 	}
-	p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumNetworkPolicyV2, func() bool {
-		return p.cnpSynced.Load() && p.cidrGroupSynced.Load()
-	})
-	p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, func() bool {
-		return p.ccnpSynced.Load() && p.cidrGroupSynced.Load()
-	})
-	p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumCIDRGroupV2Alpha1, func() bool {
-		return p.cidrGroupSynced.Load()
-	})
+	if params.Config.EnableCiliumNetworkPolicy {
+		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumNetworkPolicyV2, func() bool {
+			return p.cnpSynced.Load() && p.cidrGroupSynced.Load()
+		})
+	}
+
+	if params.Config.EnableCiliumClusterwideNetworkPolicy {
+		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, func() bool {
+			return p.ccnpSynced.Load() && p.cidrGroupSynced.Load()
+		})
+	}
+
+	if params.Config.EnableCiliumNetworkPolicy || params.Config.EnableCiliumClusterwideNetworkPolicy {
+		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumCIDRGroupV2Alpha1, func() bool {
+			return p.cidrGroupSynced.Load()
+		})
+	}
 }
